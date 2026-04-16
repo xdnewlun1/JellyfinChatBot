@@ -21,6 +21,44 @@ public class WatchHistoryService
         typeof(IUserManager).GetMethod("GetUserById", new[] { typeof(Guid) });
     private static readonly PropertyInfo? _queryUserProp =
         typeof(InternalItemsQuery).GetProperty("User");
+    private static readonly PropertyInfo? _queryOrderByProp =
+        typeof(InternalItemsQuery).GetProperty("OrderBy");
+
+    // Resolve ItemSortBy and SortOrder via reflection — these types moved assemblies
+    // between Jellyfin 10.10 (Jellyfin.Data) and 10.11+.
+    private static readonly object? _datePlayedValue;
+    private static readonly object? _descendingValue;
+    private static readonly Array? _orderByArray;
+
+    static WatchHistoryService()
+    {
+        try
+        {
+            var itemSortByType = AppDomain.CurrentDomain.GetAssemblies()
+                .SelectMany(a => { try { return a.GetExportedTypes(); } catch { return Array.Empty<Type>(); } })
+                .FirstOrDefault(t => t.FullName != null && t.Name == "ItemSortBy" && t.IsEnum);
+
+            var sortOrderType = AppDomain.CurrentDomain.GetAssemblies()
+                .SelectMany(a => { try { return a.GetExportedTypes(); } catch { return Array.Empty<Type>(); } })
+                .FirstOrDefault(t => t.FullName != null && t.Name == "SortOrder" && t.IsEnum);
+
+            if (itemSortByType != null && sortOrderType != null)
+            {
+                _datePlayedValue = Enum.Parse(itemSortByType, "DatePlayed");
+                _descendingValue = Enum.Parse(sortOrderType, "Descending");
+
+                var tupleType = typeof(ValueTuple<,>).MakeGenericType(itemSortByType, sortOrderType);
+                var tuple = Activator.CreateInstance(tupleType, _datePlayedValue, _descendingValue);
+
+                _orderByArray = Array.CreateInstance(tupleType, 1);
+                _orderByArray.SetValue(tuple, 0);
+            }
+        }
+        catch
+        {
+            // If reflection fails, sorting will be skipped — items returned in default order.
+        }
+    }
 
     public WatchHistoryService(
         ILibraryManager libraryManager,
@@ -49,6 +87,14 @@ public class WatchHistoryService
     private static void ApplyUser(InternalItemsQuery query, object user)
     {
         _queryUserProp?.SetValue(query, user);
+    }
+
+    private static void ApplyDatePlayedSort(InternalItemsQuery query)
+    {
+        if (_queryOrderByProp != null && _orderByArray != null)
+        {
+            _queryOrderByProp.SetValue(query, _orderByArray);
+        }
     }
 
     /// <summary>
@@ -81,10 +127,10 @@ public class WatchHistoryService
             IsPlayed = true,
             IsVirtualItem = false,
             Recursive = true,
-            Limit = limit,
-            OrderBy = new[] { (ItemSortBy.DatePlayed, SortOrder.Descending) }
+            Limit = limit
         };
         ApplyUser(query, user);
+        ApplyDatePlayedSort(query);
 
         _logger.LogDebug("Fetching watch history for user {User}, type={Type}, limit={Limit}",
             userId, mediaType ?? "all", limit);

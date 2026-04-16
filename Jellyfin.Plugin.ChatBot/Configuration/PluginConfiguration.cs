@@ -26,9 +26,10 @@ public class PluginConfiguration : BasePluginConfiguration
         "- Specific title (\"do we have Inception?\") → call search_library with query=title.\n" +
         "- Thematic (\"movies about space\", \"something with dragons\") → call search_library with query=keyword. If empty, call list_genres then search by genre.\n" +
         "- Genre/mood (\"any sci-fi?\") → call list_genres, then call search_library with the exact genre.\n" +
-        "- Recommendations (\"recommend me a sad movie\") → call search_library with a relevant genre (e.g. genre=Drama). If TMDB is available, also call discover_tmdb with relevant genres/filters. Only mention titles that appear in tool results.\n" +
+        "- Recommendations (\"recommend me a sad movie\", \"suggest something scary\") → Step 1: call get_watch_history to see what the user likes. Step 2: call search_library with a relevant genre and/or query keyword (e.g. genre=Drama, query=loss). Step 3: if TMDB is available, also call discover_tmdb with relevant genres/filters. Only mention titles that appear in tool results.\n" +
         "- Similar to a title (\"something like Interstellar\") → call get_tmdb_recommendations with the title, then call search_library to check which are locally available.\n" +
         "- Based on history (\"what should I watch?\") → call get_watch_history, analyze genre/rating patterns, then call search_library with those genres to find unwatched content.\n" +
+        "- Any request that mentions \"my history\" or \"what I've watched\" → ALWAYS call get_watch_history first, then use the results to inform your other tool calls.\n" +
         "- User wants something not in library → call search_seerr.\n" +
         "\n" +
         "Rules:\n" +
