@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ChatBot</title>
+</head>
+<body>
+    <div id="chatbot-config-page" data-role="page" class="page type-interior pluginConfigurationPage"
+         data-require="emby-input,emby-button,emby-checkbox,emby-textarea">
+
+        <div data-role="content">
+            <div class="content-primary">
+                <h2>ChatBot Plugin Settings</h2>
+
+                <form id="chatbot-config-form">
+                    <div class="verticalSection">
+                        <h3 class="sectionTitle">Ollama Configuration</h3>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="txtOllamaUrl">Ollama URL</label>
+                            <input id="txtOllamaUrl" type="text" is="emby-input"
+                                   placeholder="http://localhost:11434" />
+                            <div class="fieldDescription">The URL of your Ollama instance.</div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="txtOllamaModel">Ollama Model</label>
+                            <input id="txtOllamaModel" type="text" is="emby-input"
+                                   placeholder="llama3.2" />
+                            <div class="fieldDescription">The model to use for chat (e.g. llama3.2, mistral, gemma2).</div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="txtTemperature">Temperature</label>
+                            <input id="txtTemperature" type="number" is="emby-input"
+                                   min="0" max="2" step="0.1" placeholder="0.7" />
+                            <div class="fieldDescription">Controls randomness. Lower = more focused, higher = more creative.</div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="txtSystemPrompt">System Prompt</label>
+                            <textarea id="txtSystemPrompt" is="emby-textarea" rows="5"></textarea>
+                            <div class="fieldDescription">The system prompt that instructs the AI how to behave.</div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="txtMaxTurns">Max Conversation Turns</label>
+                            <input id="txtMaxTurns" type="number" is="emby-input"
+                                   min="1" max="100" step="1" placeholder="20" />
+                            <div class="fieldDescription">Maximum number of message turns to keep in context.</div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="txtSearchLimit">Search Result Limit</label>
+                            <input id="txtSearchLimit" type="number" is="emby-input"
+                                   min="1" max="50" step="1" placeholder="10" />
+                            <div class="fieldDescription">Maximum number of library search results to return.</div>
+                        </div>
+                    </div>
+
+                    <div class="verticalSection" style="margin-top:2em;">
+                        <h3 class="sectionTitle">Jellyseerr / Overseerr Configuration</h3>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input id="chkSeerrEnabled" type="checkbox" is="emby-checkbox" />
+                                <span>Enable Jellyseerr / Overseerr Integration</span>
+                            </label>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="txtSeerrUrl">Seerr URL</label>
+                            <input id="txtSeerrUrl" type="text" is="emby-input"
+                                   placeholder="http://localhost:5055" />
+                            <div class="fieldDescription">The URL of your Jellyseerr or Overseerr instance.</div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="txtSeerrApiKey">Seerr API Key</label>
+                            <input id="txtSeerrApiKey" type="password" is="emby-input" />
+                            <div class="fieldDescription">API key for your Seerr instance (found in Settings &gt; General).</div>
+                        </div>
+                    </div>
+
+                    <div style="margin-top:2em;">
+                        <button is="emby-button" type="submit" class="raised button-submit block">
+                            <span>Save</span>
+                        </button>
+                    </div>
+                </form>
+
+                <div style="margin-top:1.5em;">
+                    <button id="btnTestOllama" is="emby-button" type="button" class="raised">
+                        <span>Test Ollama Connection</span>
+                    </button>
+                    <span id="ollamaTestResult" style="margin-left:1em;"></span>
+                </div>
+
+                <div style="margin-top:0.75em;">
+                    <button id="btnTestSeerr" is="emby-button" type="button" class="raised">
+                        <span>Test Jellyseerr Connection</span>
+                    </button>
+                    <span id="seerrTestResult" style="margin-left:1em;"></span>
+                </div>
+            </div>
+        </div>
+
+    <script type="text/javascript">
+        (function () {
+            var pluginId = 'a5b6c7d8-e9f0-4a1b-8c2d-3e4f5a6b7c8d';
+
+            function $(id) { return document.getElementById(id); }
+
+            function loadConfig() {
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                    $('txtOllamaUrl').value = config.OllamaUrl || '';
+                    $('txtOllamaModel').value = config.OllamaModel || '';
+                    $('txtTemperature').value = config.Temperature != null ? config.Temperature : 0.7;
+                    $('txtSystemPrompt').value = config.SystemPrompt || '';
+                    $('txtMaxTurns').value = config.MaxConversationTurns || 20;
+                    $('txtSearchLimit').value = config.SearchResultLimit || 10;
+                    $('chkSeerrEnabled').checked = !!config.SeerrEnabled;
+                    $('txtSeerrUrl').value = config.SeerrUrl || '';
+                    $('txtSeerrApiKey').value = config.SeerrApiKey || '';
+                    Dashboard.hideLoadingMsg();
+                });
+            }
+
+            function saveConfig(e) {
+                e.preventDefault();
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+                    config.OllamaUrl = $('txtOllamaUrl').value;
+                    config.OllamaModel = $('txtOllamaModel').value;
+                    config.Temperature = parseFloat($('txtTemperature').value) || 0.7;
+                    config.SystemPrompt = $('txtSystemPrompt').value;
+                    config.MaxConversationTurns = parseInt($('txtMaxTurns').value, 10) || 20;
+                    config.SearchResultLimit = parseInt($('txtSearchLimit').value, 10) || 10;
+                    config.SeerrEnabled = $('chkSeerrEnabled').checked;
+                    config.SeerrUrl = $('txtSeerrUrl').value;
+                    config.SeerrApiKey = $('txtSeerrApiKey').value;
+                    ApiClient.updatePluginConfiguration(pluginId, config).then(function (result) {
+                        Dashboard.processPluginConfigurationUpdateResult(result);
+                    });
+                });
+                return false;
+            }
+
+            function runTest(resultId, url, okPrefix, failMsg) {
+                var resultSpan = $(resultId);
+                if (resultSpan) {
+                    resultSpan.textContent = 'Testing...';
+                    resultSpan.style.color = '';
+                }
+                ApiClient.ajax({
+                    type: 'GET',
+                    url: ApiClient.getUrl(url),
+                    dataType: 'text'
+                }).then(function (response) {
+                    if (resultSpan) {
+                        resultSpan.textContent = okPrefix + response;
+                        resultSpan.style.color = '#4caf50';
+                    }
+                }).catch(function () {
+                    if (resultSpan) {
+                        resultSpan.textContent = failMsg;
+                        resultSpan.style.color = '#f44336';
+                    }
+                });
+            }
+
+            function testOllama(e) {
+                if (e) { e.preventDefault(); }
+                runTest('ollamaTestResult', 'ChatBot/Chat/TestConnection',
+                    'Connected! Models: ',
+                    'Connection failed. Check the URL and ensure Ollama is running.');
+            }
+
+            function testSeerr(e) {
+                if (e) { e.preventDefault(); }
+                runTest('seerrTestResult', 'ChatBot/Seerr/TestConnection',
+                    '',
+                    'Connection failed. Check the URL and API key, and save settings first.');
+            }
+
+            function bind() {
+                var page = $('chatbot-config-page');
+                if (!page || page.dataset.chatbotBound === '1') return;
+                page.dataset.chatbotBound = '1';
+
+                page.addEventListener('pageshow', loadConfig);
+
+                var form = $('chatbot-config-form');
+                if (form) form.addEventListener('submit', saveConfig);
+
+                var btn = $('btnTestOllama');
+                if (btn) btn.addEventListener('click', testOllama);
+
+                var seerrBtn = $('btnTestSeerr');
+                if (seerrBtn) seerrBtn.addEventListener('click', testSeerr);
+
+                loadConfig();
+            }
+
+            function tryBind(attempts) {
+                var page = $('chatbot-config-page');
+                if (page) { bind(); return; }
+                if (attempts > 0) { setTimeout(function () { tryBind(attempts - 1); }, 50); }
+            }
+            tryBind(40);
+        })();
+    </script>
+    </div>
+</body>
+</html>

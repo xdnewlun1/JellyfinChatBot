@@ -1,0 +1,18 @@
+---
+name: "ChatBot"
+guid: "a5b6c7d8-e9f0-4a1b-8c2d-3e4f5a6b7c8d"
+version: "1.0.0.0"
+targetAbi: "10.10.0.0"
+owner: "JellyfinChatBot"
+overview: "AI chatbot plugin powered by Ollama with library search and Jellyseerr integration"
+description: "Adds an AI chatbot to Jellyfin that can search your media library, answer questions about your content, and help request new media through Jellyseerr/Overseerr."
+category: "General"
+artifacts:
+  - "Jellyfin.Plugin.ChatBot.dll"
+changelog: |
+  ## v1.0.0.0
+  - Initial release
+  - Ollama-powered chat with configurable model
+  - Library search integration
+  - Jellyseerr/Overseerr request support
+  - Floating chat widget with playback detection
