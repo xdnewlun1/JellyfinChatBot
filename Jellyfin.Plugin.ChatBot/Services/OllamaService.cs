@@ -54,7 +54,8 @@ public class OllamaService
             Messages = messages,
             Stream = false,
             Tools = tools,
-            Options = new OllamaOptions { Temperature = Math.Clamp(config.Temperature, 0f, 2f) }
+            Options = new OllamaOptions { Temperature = Math.Clamp(config.Temperature, 0f, 2f) },
+            Think = config.EnableThinking ? true : null
         };
 
         _logger.LogDebug("Sending chat request to Ollama: {Model}", config.OllamaModel);
@@ -123,6 +124,9 @@ public class OllamaChatRequest
 
     [JsonPropertyName("options")]
     public OllamaOptions? Options { get; set; }
+
+    [JsonPropertyName("think")]
+    public bool? Think { get; set; }
 }
 
 public class OllamaChatMessage
@@ -135,6 +139,13 @@ public class OllamaChatMessage
 
     [JsonPropertyName("tool_calls")]
     public List<OllamaToolCall>? ToolCalls { get; set; }
+
+    /// <summary>
+    /// Internal reasoning from models that support thinking (e.g. Gemma4).
+    /// Present in responses when think=true is set on the request.
+    /// </summary>
+    [JsonPropertyName("thinking")]
+    public string? Thinking { get; set; }
 }
 
 public class OllamaOptions

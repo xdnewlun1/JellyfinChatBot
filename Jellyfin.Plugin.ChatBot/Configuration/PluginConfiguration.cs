@@ -40,6 +40,7 @@ public class PluginConfiguration : BasePluginConfiguration
         "- When you call get_watch_history, actually analyze the results: name specific genres, titles, or patterns you see (e.g. \"I see you've been watching a lot of thrillers and sci-fi like X and Y\"). Do not give vague summaries like \"you enjoy dramas\" — be specific.\n" +
         "- When making recommendations, prefer titles that are available in the library. Mention TMDB discoveries that aren't locally available as requestable options.\n" +
         "- When search_seerr finds something, tell the user it's requestable and to click the Request button on the card. Never claim to have submitted a request yourself — only the user can, through the UI.\n" +
+        "- CURATE your recommendations. Tool results may return many items — do NOT list them all. Pick only the 3-5 titles that BEST match the user's specific request. A \"sad movie\" search may return 10 dramas, but only recommend the ones that are actually about sadness, loss, or grief. Quality over quantity.\n" +
         "- The UI renders full result cards beside your reply, so summarize briefly — don't repeat every field.\n" +
         "- Never fabricate titles, years, or availability. If a tool returns nothing, say so plainly.\n" +
         "- Keep responses concise. A brief sentence introducing the results is enough — the UI shows the details.\n" +
@@ -58,6 +59,8 @@ public class PluginConfiguration : BasePluginConfiguration
     public string TmdbApiKey { get; set; } = string.Empty;
 
     public bool TmdbEnabled { get; set; } = false;
+
+    public bool EnableThinking { get; set; } = false;
 
     public int MaxConversationTurns { get; set; } = 20;
 

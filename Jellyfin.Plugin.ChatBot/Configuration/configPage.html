@@ -32,6 +32,13 @@
                                    min="0" max="2" step="0.1" placeholder="0.7" />
                             <div class="fieldDescription">Controls randomness. Lower = more focused, higher = more creative.</div>
                         </div>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input id="chkEnableThinking" type="checkbox" is="emby-checkbox" />
+                                <span>Enable Thinking / Extended Reasoning</span>
+                            </label>
+                            <div class="fieldDescription" style="margin-left:2em;">Let the model reason internally before responding. Improves recommendation quality but increases response time. Requires a model that supports thinking (e.g. Gemma 4, QwQ, DeepSeek-R1).</div>
+                        </div>
                         <div class="inputContainer">
                             <label class="inputLabel" for="txtSystemPrompt">System Prompt</label>
                             <textarea id="txtSystemPrompt" is="emby-textarea" rows="5"></textarea>
@@ -129,6 +136,7 @@
                     $('txtSystemPrompt').value = config.SystemPrompt || '';
                     $('txtMaxTurns').value = config.MaxConversationTurns || 20;
                     $('txtSearchLimit').value = config.SearchResultLimit || 10;
+                    $('chkEnableThinking').checked = !!config.EnableThinking;
                     $('chkTmdbEnabled').checked = !!config.TmdbEnabled;
                     $('txtTmdbApiKey').value = config.TmdbApiKey || '';
                     $('chkSeerrEnabled').checked = !!config.SeerrEnabled;
@@ -148,6 +156,7 @@
                     config.SystemPrompt = $('txtSystemPrompt').value;
                     config.MaxConversationTurns = parseInt($('txtMaxTurns').value, 10) || 20;
                     config.SearchResultLimit = parseInt($('txtSearchLimit').value, 10) || 10;
+                    config.EnableThinking = $('chkEnableThinking').checked;
                     config.TmdbEnabled = $('chkTmdbEnabled').checked;
                     config.TmdbApiKey = $('txtTmdbApiKey').value;
                     config.SeerrEnabled = $('chkSeerrEnabled').checked;
