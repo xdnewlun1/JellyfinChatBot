@@ -149,6 +149,12 @@ public class LibrarySearchService
             filtered = filtered.Where(i => i.CommunityRating.HasValue && i.CommunityRating.Value >= minCommunityRating.Value);
         }
 
+        // When filters are active, sort by community rating so the best content surfaces first
+        if (hasPostFilters || !string.IsNullOrWhiteSpace(genre))
+        {
+            filtered = filtered.OrderByDescending(i => i.CommunityRating ?? 0f);
+        }
+
         return filtered.Take(searchLimit).Select(item => new LibrarySearchResult
         {
             Id = item.Id.ToString("N"),
