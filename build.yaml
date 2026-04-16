@@ -1,7 +1,7 @@
 ---
 name: "ChatBot"
 guid: "a5b6c7d8-e9f0-4a1b-8c2d-3e4f5a6b7c8d"
-version: "1.1.0.0"
+version: "1.1.1.0"
 targetAbi: "10.10.0.0"
 owner: "JellyfinChatBot"
 overview: "AI chatbot plugin powered by Ollama with library search, recommendations, and Jellyseerr integration"
@@ -10,6 +10,12 @@ category: "General"
 artifacts:
   - "Jellyfin.Plugin.ChatBot.dll"
 changelog: |
+  ## v1.1.1.0
+  - Strengthened system prompt to enforce tool calling before responding
+  - LLM no longer skips tools and fabricates recommendations
+  - Removed emoji usage from default prompt
+  - More concise bot responses
+
   ## v1.1.0.0
   - Personalized recommendations based on watch history
   - TMDB discovery: find movies/TV by genre, year, rating, popularity
