@@ -52,6 +52,21 @@
                     </div>
 
                     <div class="verticalSection" style="margin-top:2em;">
+                        <h3 class="sectionTitle">TMDB Configuration</h3>
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input id="chkTmdbEnabled" type="checkbox" is="emby-checkbox" />
+                                <span>Enable TMDB Integration (Recommendations &amp; Discovery)</span>
+                            </label>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="txtTmdbApiKey">TMDB API Key</label>
+                            <input id="txtTmdbApiKey" type="password" is="emby-input" />
+                            <div class="fieldDescription">API key from themoviedb.org (v3 key or v4 read access token). Enables discover and recommendation tools.</div>
+                        </div>
+                    </div>
+
+                    <div class="verticalSection" style="margin-top:2em;">
                         <h3 class="sectionTitle">Jellyseerr / Overseerr Configuration</h3>
                         <div class="checkboxContainer checkboxContainer-withDescription">
                             <label class="emby-checkbox-label">
@@ -110,6 +125,8 @@
                     $('txtSystemPrompt').value = config.SystemPrompt || '';
                     $('txtMaxTurns').value = config.MaxConversationTurns || 20;
                     $('txtSearchLimit').value = config.SearchResultLimit || 10;
+                    $('chkTmdbEnabled').checked = !!config.TmdbEnabled;
+                    $('txtTmdbApiKey').value = config.TmdbApiKey || '';
                     $('chkSeerrEnabled').checked = !!config.SeerrEnabled;
                     $('txtSeerrUrl').value = config.SeerrUrl || '';
                     $('txtSeerrApiKey').value = config.SeerrApiKey || '';
@@ -127,6 +144,8 @@
                     config.SystemPrompt = $('txtSystemPrompt').value;
                     config.MaxConversationTurns = parseInt($('txtMaxTurns').value, 10) || 20;
                     config.SearchResultLimit = parseInt($('txtSearchLimit').value, 10) || 10;
+                    config.TmdbEnabled = $('chkTmdbEnabled').checked;
+                    config.TmdbApiKey = $('txtTmdbApiKey').value;
                     config.SeerrEnabled = $('chkSeerrEnabled').checked;
                     config.SeerrUrl = $('txtSeerrUrl').value;
                     config.SeerrApiKey = $('txtSeerrApiKey').value;

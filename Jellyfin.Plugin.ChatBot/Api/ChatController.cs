@@ -22,17 +22,23 @@ public class ChatController : ControllerBase
     private readonly OllamaService _ollamaService;
     private readonly LibrarySearchService _librarySearchService;
     private readonly SeerrService _seerrService;
+    private readonly TmdbService _tmdbService;
+    private readonly WatchHistoryService _watchHistoryService;
     private readonly ILogger<ChatController> _logger;
 
     public ChatController(
         OllamaService ollamaService,
         LibrarySearchService librarySearchService,
         SeerrService seerrService,
+        TmdbService tmdbService,
+        WatchHistoryService watchHistoryService,
         ILogger<ChatController> logger)
     {
         _ollamaService = ollamaService;
         _librarySearchService = librarySearchService;
         _seerrService = seerrService;
+        _tmdbService = tmdbService;
+        _watchHistoryService = watchHistoryService;
         _logger = logger;
     }
 
@@ -184,7 +190,7 @@ public class ChatController : ControllerBase
                 Function = new OllamaToolFunction
                 {
                     Name = "search_library",
-                    Description = "Search the Jellyfin media library for movies and TV shows. Matches against title and overview/description text. Optionally filter by genre and media type. Use this when the user asks about available content, including thematic queries like 'movies about space' (pass query='space').",
+                    Description = "Search the Jellyfin media library for movies and TV shows. Matches against title and overview/description text. Supports filtering by genre, year range, tags, and minimum community rating. Use this when the user asks about available content.",
                     Parameters = new OllamaToolParameters
                     {
                         Properties = new Dictionary<string, OllamaToolProperty>
@@ -192,7 +198,7 @@ public class ChatController : ControllerBase
                             ["query"] = new OllamaToolProperty
                             {
                                 Type = "string",
-                                Description = "Keyword to match in title or overview. Optional if a genre is supplied."
+                                Description = "Keyword to match in title or overview. Optional if other filters are supplied."
                             },
                             ["media_type"] = new OllamaToolProperty
                             {
@@ -204,6 +210,26 @@ public class ChatController : ControllerBase
                             {
                                 Type = "string",
                                 Description = "Exact genre name (e.g. 'Science Fiction', 'Comedy'). Call list_genres first if unsure which genres exist."
+                            },
+                            ["year_min"] = new OllamaToolProperty
+                            {
+                                Type = "number",
+                                Description = "Minimum production year (e.g. 2020)."
+                            },
+                            ["year_max"] = new OllamaToolProperty
+                            {
+                                Type = "number",
+                                Description = "Maximum production year (e.g. 2024)."
+                            },
+                            ["tags"] = new OllamaToolProperty
+                            {
+                                Type = "string",
+                                Description = "Filter by a tag on the media item."
+                            },
+                            ["min_community_rating"] = new OllamaToolProperty
+                            {
+                                Type = "number",
+                                Description = "Minimum community rating (0-10 scale, e.g. 7.5)."
                             }
                         },
                         Required = new List<string>()
@@ -230,8 +256,112 @@ public class ChatController : ControllerBase
                         Required = new List<string>()
                     }
                 }
+            },
+            new OllamaTool
+            {
+                Function = new OllamaToolFunction
+                {
+                    Name = "get_watch_history",
+                    Description = "Get the user's recently watched movies and TV shows, sorted by most recently played. Returns genres and ratings for each item. Use this to understand the user's preferences for personalized recommendations.",
+                    Parameters = new OllamaToolParameters
+                    {
+                        Properties = new Dictionary<string, OllamaToolProperty>
+                        {
+                            ["media_type"] = new OllamaToolProperty
+                            {
+                                Type = "string",
+                                Description = "Restrict to 'movie' or 'series'. Omit for both.",
+                                Enum = new List<string> { "movie", "series" }
+                            },
+                            ["limit"] = new OllamaToolProperty
+                            {
+                                Type = "number",
+                                Description = "Number of items to return (1-100, default 30)."
+                            }
+                        },
+                        Required = new List<string>()
+                    }
+                }
             }
         };
+
+        if (config.TmdbEnabled && !string.IsNullOrWhiteSpace(config.TmdbApiKey))
+        {
+            tools.Add(new OllamaTool
+            {
+                Function = new OllamaToolFunction
+                {
+                    Name = "discover_tmdb",
+                    Description = "Discover movies or TV shows on TMDB by genre, year, rating, and other filters. Great for finding content by mood, theme, or era. Use for recommendations and discovery of content that may or may not be in the library.",
+                    Parameters = new OllamaToolParameters
+                    {
+                        Properties = new Dictionary<string, OllamaToolProperty>
+                        {
+                            ["media_type"] = new OllamaToolProperty
+                            {
+                                Type = "string",
+                                Description = "Required. 'movie' or 'tv'.",
+                                Enum = new List<string> { "movie", "tv" }
+                            },
+                            ["genres"] = new OllamaToolProperty
+                            {
+                                Type = "string",
+                                Description = "Comma-separated genre names (e.g. 'Drama,Thriller'). Uses TMDB genre names: Action, Adventure, Animation, Comedy, Crime, Documentary, Drama, Family, Fantasy, History, Horror, Music, Mystery, Romance, Science Fiction, Thriller, War, Western."
+                            },
+                            ["year_min"] = new OllamaToolProperty
+                            {
+                                Type = "number",
+                                Description = "Minimum release year."
+                            },
+                            ["year_max"] = new OllamaToolProperty
+                            {
+                                Type = "number",
+                                Description = "Maximum release year."
+                            },
+                            ["sort_by"] = new OllamaToolProperty
+                            {
+                                Type = "string",
+                                Description = "Sort order. Default: 'popularity.desc'.",
+                                Enum = new List<string> { "popularity.desc", "vote_average.desc", "primary_release_date.desc", "revenue.desc" }
+                            },
+                            ["min_rating"] = new OllamaToolProperty
+                            {
+                                Type = "number",
+                                Description = "Minimum TMDB vote average (0-10, e.g. 7.0). Requires at least 50 votes."
+                            }
+                        },
+                        Required = new List<string> { "media_type" }
+                    }
+                }
+            });
+
+            tools.Add(new OllamaTool
+            {
+                Function = new OllamaToolFunction
+                {
+                    Name = "get_tmdb_recommendations",
+                    Description = "Get movie/TV recommendations similar to a specific title from TMDB. Searches for the title first, then returns similar and recommended titles. Use when the user says 'something like X' or 'movies similar to X'.",
+                    Parameters = new OllamaToolParameters
+                    {
+                        Properties = new Dictionary<string, OllamaToolProperty>
+                        {
+                            ["title"] = new OllamaToolProperty
+                            {
+                                Type = "string",
+                                Description = "The title to find recommendations for."
+                            },
+                            ["media_type"] = new OllamaToolProperty
+                            {
+                                Type = "string",
+                                Description = "Restrict to 'movie' or 'tv'. Omit to search both.",
+                                Enum = new List<string> { "movie", "tv" }
+                            }
+                        },
+                        Required = new List<string> { "title" }
+                    }
+                }
+            });
+        }
 
         if (config.SeerrEnabled)
         {
@@ -285,11 +415,20 @@ public class ChatController : ControllerBase
                     var query = GetArgString(args, "query");
                     var mediaType = GetArgString(args, "media_type");
                     var genre = GetArgString(args, "genre");
+                    var tags = GetArgString(args, "tags");
+                    var yearMin = GetArgInt(args, "year_min");
+                    var yearMax = GetArgInt(args, "year_max");
+                    var minRating = GetArgDouble(args, "min_community_rating");
+
                     var results = _librarySearchService.Search(
                         userId,
                         string.IsNullOrWhiteSpace(query) ? null : query,
                         string.IsNullOrWhiteSpace(mediaType) ? null : mediaType,
-                        string.IsNullOrWhiteSpace(genre) ? null : genre);
+                        string.IsNullOrWhiteSpace(genre) ? null : genre,
+                        yearMin > 0 ? yearMin : null,
+                        yearMax > 0 ? yearMax : null,
+                        string.IsNullOrWhiteSpace(tags) ? null : tags,
+                        minRating > 0 ? minRating : null);
                     chatResponse.LibraryResults = results;
 
                     if (results.Count == 0)
@@ -301,7 +440,7 @@ public class ChatController : ControllerBase
                     {
                         found = true,
                         count = results.Count,
-                        results = results.Select(r => new { r.Name, r.Year, r.Type, r.Overview })
+                        results = results.Select(r => new { r.Name, r.Year, r.Type, r.Overview, r.Genres, r.CommunityRating })
                     });
                 }
 
@@ -312,6 +451,84 @@ public class ChatController : ControllerBase
                         userId,
                         string.IsNullOrWhiteSpace(mediaType) ? null : mediaType);
                     return JsonSerializer.Serialize(new { count = genres.Count, genres });
+                }
+
+                case "get_watch_history":
+                {
+                    var mediaType = GetArgString(args, "media_type");
+                    var limit = GetArgInt(args, "limit");
+                    var items = _watchHistoryService.GetWatchHistory(
+                        userId,
+                        string.IsNullOrWhiteSpace(mediaType) ? null : mediaType,
+                        limit > 0 ? limit : 30);
+
+                    if (items.Count == 0)
+                    {
+                        return JsonSerializer.Serialize(new { found = false, message = "No watch history found." });
+                    }
+
+                    return JsonSerializer.Serialize(new
+                    {
+                        found = true,
+                        count = items.Count,
+                        items = items.Select(i => new { i.Name, i.Year, i.Type, i.Genres, i.CommunityRating })
+                    });
+                }
+
+                case "discover_tmdb":
+                {
+                    var mediaType = GetArgString(args, "media_type");
+                    var genres = GetArgString(args, "genres");
+                    var yearMin = GetArgInt(args, "year_min");
+                    var yearMax = GetArgInt(args, "year_max");
+                    var sortBy = GetArgString(args, "sort_by");
+                    var minRating = GetArgFloat(args, "min_rating");
+
+                    var results = await _tmdbService.DiscoverAsync(
+                        string.IsNullOrWhiteSpace(mediaType) ? "movie" : mediaType,
+                        string.IsNullOrWhiteSpace(genres) ? null : genres,
+                        yearMin > 0 ? yearMin : null,
+                        yearMax > 0 ? yearMax : null,
+                        string.IsNullOrWhiteSpace(sortBy) ? null : sortBy,
+                        minRating > 0 ? minRating : null,
+                        cancellationToken).ConfigureAwait(false);
+                    chatResponse.TmdbResults = results;
+
+                    if (results.Count == 0)
+                    {
+                        return JsonSerializer.Serialize(new { found = false, message = "No TMDB results matched the filters." });
+                    }
+
+                    return JsonSerializer.Serialize(new
+                    {
+                        found = true,
+                        count = results.Count,
+                        results = results.Select(r => new { r.Title, r.Year, r.MediaType, r.Overview, r.Rating, r.Genres })
+                    });
+                }
+
+                case "get_tmdb_recommendations":
+                {
+                    var title = GetArgString(args, "title");
+                    var mediaType = GetArgString(args, "media_type");
+
+                    var results = await _tmdbService.GetRecommendationsAsync(
+                        title,
+                        string.IsNullOrWhiteSpace(mediaType) ? null : mediaType,
+                        cancellationToken).ConfigureAwait(false);
+                    chatResponse.TmdbResults = results;
+
+                    if (results.Count == 0)
+                    {
+                        return JsonSerializer.Serialize(new { found = false, message = $"No recommendations found for '{title}'." });
+                    }
+
+                    return JsonSerializer.Serialize(new
+                    {
+                        found = true,
+                        count = results.Count,
+                        results = results.Select(r => new { r.Title, r.Year, r.MediaType, r.Overview, r.Rating, r.Genres })
+                    });
                 }
 
                 case "search_seerr":
@@ -362,5 +579,38 @@ public class ChatController : ControllerBase
         }
 
         return string.Empty;
+    }
+
+    private static int GetArgInt(JsonElement args, string key)
+    {
+        if (args.ValueKind == JsonValueKind.Object && args.TryGetProperty(key, out var val))
+        {
+            if (val.ValueKind == JsonValueKind.Number) return val.GetInt32();
+            if (val.ValueKind == JsonValueKind.String && int.TryParse(val.GetString(), out var i)) return i;
+        }
+
+        return 0;
+    }
+
+    private static float GetArgFloat(JsonElement args, string key)
+    {
+        if (args.ValueKind == JsonValueKind.Object && args.TryGetProperty(key, out var val))
+        {
+            if (val.ValueKind == JsonValueKind.Number) return val.GetSingle();
+            if (val.ValueKind == JsonValueKind.String && float.TryParse(val.GetString(), out var f)) return f;
+        }
+
+        return 0f;
+    }
+
+    private static double GetArgDouble(JsonElement args, string key)
+    {
+        if (args.ValueKind == JsonValueKind.Object && args.TryGetProperty(key, out var val))
+        {
+            if (val.ValueKind == JsonValueKind.Number) return val.GetDouble();
+            if (val.ValueKind == JsonValueKind.String && double.TryParse(val.GetString(), out var d)) return d;
+        }
+
+        return 0d;
     }
 }

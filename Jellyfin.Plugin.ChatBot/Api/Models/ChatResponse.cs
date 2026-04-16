@@ -13,4 +13,7 @@ public class ChatResponse
 
     [JsonPropertyName("seerrResults")]
     public List<SeerrSearchResult>? SeerrResults { get; set; }
+
+    [JsonPropertyName("tmdbResults")]
+    public List<TmdbResult>? TmdbResults { get; set; }
 }

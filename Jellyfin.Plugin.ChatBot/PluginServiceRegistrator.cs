@@ -12,6 +12,8 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<OllamaService>();
         serviceCollection.AddSingleton<LibrarySearchService>();
         serviceCollection.AddSingleton<SeerrService>();
+        serviceCollection.AddSingleton<TmdbService>();
+        serviceCollection.AddSingleton<WatchHistoryService>();
         serviceCollection.AddHostedService<StartupService>();
     }
 }

@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace Jellyfin.Plugin.ChatBot.Api.Models;
 
-public class LibrarySearchResult
+public class WatchHistoryItem
 {
     [JsonPropertyName("id")]
     public string Id { get; set; } = string.Empty;
@@ -19,9 +19,6 @@ public class LibrarySearchResult
 
     [JsonPropertyName("type")]
     public string Type { get; set; } = string.Empty;
-
-    [JsonPropertyName("imageUrl")]
-    public string? ImageUrl { get; set; }
 
     [JsonPropertyName("genres")]
     public List<string>? Genres { get; set; }

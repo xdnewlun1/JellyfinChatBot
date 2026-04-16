@@ -54,7 +54,15 @@ public class LibrarySearchService
         _queryUserProp?.SetValue(query, user);
     }
 
-    public List<LibrarySearchResult> Search(Guid userId, string? query, string? mediaType = null, string? genre = null)
+    public List<LibrarySearchResult> Search(
+        Guid userId,
+        string? query,
+        string? mediaType = null,
+        string? genre = null,
+        int? yearMin = null,
+        int? yearMax = null,
+        string? tags = null,
+        double? minCommunityRating = null)
     {
         var config = Plugin.Instance!.Configuration;
         var searchLimit = Math.Clamp(config.SearchResultLimit, 1, 50);
@@ -77,10 +85,14 @@ public class LibrarySearchService
             return new List<LibrarySearchResult>();
         }
 
+        // When post-filters are active, fetch more items so we have enough after filtering
+        bool hasPostFilters = yearMin.HasValue || yearMax.HasValue || minCommunityRating.HasValue;
+        var queryLimit = hasPostFilters ? Math.Min(searchLimit * 10, 500) : searchLimit;
+
         var internalQuery = new InternalItemsQuery
         {
             IncludeItemTypes = itemTypes.ToArray(),
-            Limit = searchLimit,
+            Limit = queryLimit,
             IsVirtualItem = false,
             Recursive = true
         };
@@ -96,8 +108,14 @@ public class LibrarySearchService
             internalQuery.Genres = new[] { genre };
         }
 
-        _logger.LogDebug("Library search: qLen={QLen} type={Type} genre={GenrePresent}",
-            (query ?? string.Empty).Length, mediaType ?? "all", !string.IsNullOrEmpty(genre));
+        if (!string.IsNullOrWhiteSpace(tags))
+        {
+            internalQuery.Tags = new[] { tags };
+        }
+
+        _logger.LogDebug("Library search: qLen={QLen} type={Type} genre={GenrePresent} yearRange={YearMin}-{YearMax} rating>={Rating}",
+            (query ?? string.Empty).Length, mediaType ?? "all", !string.IsNullOrEmpty(genre),
+            yearMin, yearMax, minCommunityRating);
 
         var items = _libraryManager.GetItemsResult(internalQuery).Items;
 
@@ -112,7 +130,26 @@ public class LibrarySearchService
             ).ToArray();
         }
 
-        return items.Select(item => new LibrarySearchResult
+        IEnumerable<BaseItem> filtered = items;
+
+        // Post-filter by year range
+        if (yearMin.HasValue)
+        {
+            filtered = filtered.Where(i => i.ProductionYear.HasValue && i.ProductionYear.Value >= yearMin.Value);
+        }
+
+        if (yearMax.HasValue)
+        {
+            filtered = filtered.Where(i => i.ProductionYear.HasValue && i.ProductionYear.Value <= yearMax.Value);
+        }
+
+        // Post-filter by community rating
+        if (minCommunityRating.HasValue)
+        {
+            filtered = filtered.Where(i => i.CommunityRating.HasValue && i.CommunityRating.Value >= minCommunityRating.Value);
+        }
+
+        return filtered.Take(searchLimit).Select(item => new LibrarySearchResult
         {
             Id = item.Id.ToString("N"),
             Name = item.Name,
@@ -121,7 +158,9 @@ public class LibrarySearchService
             Type = item.GetBaseItemKind().ToString(),
             ImageUrl = item.PrimaryImagePath != null
                 ? $"/Items/{item.Id}/Images/Primary"
-                : null
+                : null,
+            Genres = item.Genres?.Length > 0 ? item.Genres.ToList() : null,
+            CommunityRating = item.CommunityRating
         }).ToList();
     }
 
