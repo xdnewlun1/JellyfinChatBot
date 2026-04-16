@@ -161,6 +161,15 @@ public class ChatController : ControllerBase
         return Ok(chatResponse);
     }
 
+    [HttpGet("DefaultSystemPrompt")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<string> GetDefaultSystemPrompt()
+    {
+        var defaultConfig = new Configuration.PluginConfiguration();
+        return Ok(defaultConfig.SystemPrompt);
+    }
+
     [HttpGet("TestConnection")]
     [Authorize]
     [ProducesResponseType(StatusCodes.Status200OK)]

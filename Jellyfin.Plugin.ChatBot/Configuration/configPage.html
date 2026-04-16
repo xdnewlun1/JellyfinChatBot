@@ -36,6 +36,10 @@
                             <label class="inputLabel" for="txtSystemPrompt">System Prompt</label>
                             <textarea id="txtSystemPrompt" is="emby-textarea" rows="5"></textarea>
                             <div class="fieldDescription">The system prompt that instructs the AI how to behave.</div>
+                            <button id="btnResetPrompt" is="emby-button" type="button" class="raised" style="margin-top:0.5em;">
+                                <span>Reset to Default</span>
+                            </button>
+                            <span id="resetPromptResult" style="margin-left:1em;"></span>
                         </div>
                         <div class="inputContainer">
                             <label class="inputLabel" for="txtMaxTurns">Max Conversation Turns</label>
@@ -193,6 +197,31 @@
                     'Connection failed. Check the URL and API key, and save settings first.');
             }
 
+            function resetPrompt(e) {
+                if (e) { e.preventDefault(); }
+                var resultSpan = $('resetPromptResult');
+                if (resultSpan) {
+                    resultSpan.textContent = 'Loading default...';
+                    resultSpan.style.color = '';
+                }
+                ApiClient.ajax({
+                    type: 'GET',
+                    url: ApiClient.getUrl('ChatBot/Chat/DefaultSystemPrompt'),
+                    dataType: 'text'
+                }).then(function (response) {
+                    $('txtSystemPrompt').value = response;
+                    if (resultSpan) {
+                        resultSpan.textContent = 'Prompt reset to default. Click Save to apply.';
+                        resultSpan.style.color = '#4caf50';
+                    }
+                }).catch(function () {
+                    if (resultSpan) {
+                        resultSpan.textContent = 'Failed to load default prompt.';
+                        resultSpan.style.color = '#f44336';
+                    }
+                });
+            }
+
             function bind() {
                 var page = $('chatbot-config-page');
                 if (!page || page.dataset.chatbotBound === '1') return;
@@ -205,6 +234,9 @@
 
                 var btn = $('btnTestOllama');
                 if (btn) btn.addEventListener('click', testOllama);
+
+                var resetBtn = $('btnResetPrompt');
+                if (resetBtn) resetBtn.addEventListener('click', resetPrompt);
 
                 var seerrBtn = $('btnTestSeerr');
                 if (seerrBtn) seerrBtn.addEventListener('click', testSeerr);
