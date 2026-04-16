@@ -1,0 +1,178 @@
+name: Release Plugin
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Parse version from tag
+        id: version
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          # Strip leading 'v' if present
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          # Jellyfin uses four-part versions
+          if [[ "$VERSION" == *.*.*.* ]]; then
+            echo "version_four=${VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version_four=${VERSION}.0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build plugin
+        run: |
+          dotnet publish Jellyfin.Plugin.ChatBot/Jellyfin.Plugin.ChatBot.csproj \
+            --configuration Release \
+            --output ./build \
+            -p:Version=${{ steps.version.outputs.version_four }}
+
+      - name: Create release zip
+        run: |
+          cd build
+          zip -j ../chatbot-${{ github.event.inputs.tag }}.zip Jellyfin.Plugin.ChatBot.dll
+          cd ..
+
+      - name: Compute checksum
+        id: checksum
+        run: |
+          CHECKSUM=$(md5sum chatbot-${{ github.event.inputs.tag }}.zip | awk '{print $1}')
+          echo "md5=${CHECKSUM}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate manifest.json
+        run: |
+          REPO_URL="https://github.com/${{ github.repository }}"
+          cat > manifest.json << 'MANIFEST_EOF'
+          [
+            {
+              "guid": "a5b6c7d8-e9f0-4a1b-8c2d-3e4f5a6b7c8d",
+              "name": "ChatBot",
+              "overview": "AI chatbot plugin powered by Ollama with library search and Jellyseerr integration",
+              "description": "Adds an AI chatbot to Jellyfin that can search your media library, answer questions about your content, and help request new media through Jellyseerr/Overseerr.",
+              "owner": "xdnewlun1",
+              "category": "General",
+              "versions": []
+            }
+          ]
+          MANIFEST_EOF
+
+          # Trim leading whitespace from heredoc
+          python3 << 'PYEOF'
+          import json, os, datetime
+
+          repo_url = os.environ.get("REPO_URL", f"https://github.com/{os.environ['GITHUB_REPOSITORY']}")
+          tag = "${{ github.event.inputs.tag }}"
+          version = "${{ steps.version.outputs.version_four }}"
+          checksum = "${{ steps.checksum.outputs.md5 }}"
+          timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+          # Load existing manifest from gh-pages if it exists, otherwise start fresh
+          manifest_path = "manifest.json"
+
+          manifest = [
+            {
+              "guid": "a5b6c7d8-e9f0-4a1b-8c2d-3e4f5a6b7c8d",
+              "name": "ChatBot",
+              "overview": "AI chatbot plugin powered by Ollama with library search and Jellyseerr integration",
+              "description": "Adds an AI chatbot to Jellyfin that can search your media library, answer questions about your content, and help request new media through Jellyseerr/Overseerr.",
+              "owner": "xdnewlun1",
+              "category": "General",
+              "versions": []
+            }
+          ]
+
+          # Try to fetch existing manifest from gh-pages
+          import urllib.request
+          try:
+            url = f"{repo_url}/releases/download/manifest/manifest.json"
+            req = urllib.request.urlopen(url, timeout=10)
+            manifest = json.loads(req.read().decode())
+          except Exception:
+            pass
+
+          new_version = {
+            "version": version,
+            "changelog": f"Release {tag}",
+            "targetAbi": "10.10.0.0",
+            "sourceUrl": f"{repo_url}/releases/download/{tag}/chatbot-{tag}.zip",
+            "checksum": checksum,
+            "timestamp": timestamp
+          }
+
+          # Remove existing entry for same version if re-releasing
+          manifest[0]["versions"] = [
+            v for v in manifest[0]["versions"]
+            if v["version"] != version
+          ]
+
+          # Prepend new version (newest first)
+          manifest[0]["versions"].insert(0, new_version)
+
+          with open(manifest_path, "w") as f:
+            json.dump(manifest, f, indent=2)
+
+          print(json.dumps(manifest, indent=2))
+          PYEOF
+        env:
+          REPO_URL: "https://github.com/${{ github.repository }}"
+
+      - name: Create git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ github.event.inputs.tag }}" -m "Release ${{ github.event.inputs.tag }}"
+          git push origin "${{ github.event.inputs.tag }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          name: ${{ github.event.inputs.tag }}
+          body: |
+            ## ChatBot Plugin ${{ github.event.inputs.tag }}
+
+            ### Installation via Manifest
+            Add this manifest URL to your Jellyfin plugin repositories:
+            ```
+            https://github.com/${{ github.repository }}/releases/download/manifest/manifest.json
+            ```
+
+            ### Manual Installation
+            1. Download `chatbot-${{ github.event.inputs.tag }}.zip`
+            2. Extract to your Jellyfin plugins directory
+            3. Restart Jellyfin
+          files: |
+            chatbot-${{ github.event.inputs.tag }}.zip
+          generate_release_notes: true
+
+      - name: Upload manifest to dedicated release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Create or update the 'manifest' release that holds manifest.json
+          # This gives a stable URL for the manifest file
+          if gh release view manifest > /dev/null 2>&1; then
+            gh release upload manifest manifest.json --clobber
+          else
+            gh release create manifest manifest.json \
+              --title "Plugin Manifest" \
+              --notes "This release hosts the plugin manifest file. Add the manifest.json URL to your Jellyfin plugin repositories." \
+              --latest=false
+          fi
