@@ -1,15 +1,23 @@
 ---
 name: "ChatBot"
 guid: "a5b6c7d8-e9f0-4a1b-8c2d-3e4f5a6b7c8d"
-version: "1.0.0.0"
+version: "1.1.0.0"
 targetAbi: "10.10.0.0"
 owner: "JellyfinChatBot"
-overview: "AI chatbot plugin powered by Ollama with library search and Jellyseerr integration"
-description: "Adds an AI chatbot to Jellyfin that can search your media library, answer questions about your content, and help request new media through Jellyseerr/Overseerr."
+overview: "AI chatbot plugin powered by Ollama with library search, recommendations, and Jellyseerr integration"
+description: "Adds an AI chatbot to Jellyfin that can search your media library, give personalized recommendations based on watch history, discover content via TMDB, and help request new media through Jellyseerr/Overseerr."
 category: "General"
 artifacts:
   - "Jellyfin.Plugin.ChatBot.dll"
 changelog: |
+  ## v1.1.0.0
+  - Personalized recommendations based on watch history
+  - TMDB discovery: find movies/TV by genre, year, rating, popularity
+  - "Similar to" recommendations via TMDB
+  - Enhanced library search: filter by year range, tags, community rating
+  - Library results now include genres and ratings
+  - TMDB configuration section in plugin settings
+
   ## v1.0.0.0
   - Initial release
   - Ollama-powered chat with configurable model
