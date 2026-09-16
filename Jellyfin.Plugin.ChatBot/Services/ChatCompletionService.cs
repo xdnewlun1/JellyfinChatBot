@@ -38,6 +38,40 @@ public class ChatCompletionService
         @"<(think|thinking|reasoning)>.*?</\1>\s*",
         RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    // XML-style tool calls, as emitted by models trained on that convention. The
+    // namespace prefix varies by model, so it is matched loosely.
+    private static readonly Regex InvokeBlockRegex = new(
+        @"<\s*(?:[\w.-]+:)?invoke\b[^>]*\bname\s*=\s*[""']([^""']+)[""'][^>]*>(.*?)<\s*/\s*(?:[\w.-]+:)?invoke\s*>",
+        RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex InvokeParameterRegex = new(
+        @"<\s*(?:[\w.-]+:)?parameter\b[^>]*\bname\s*=\s*[""']([^""']+)[""'][^>]*>(.*?)<\s*/\s*(?:[\w.-]+:)?parameter\s*>",
+        RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Harmony channel routing used by gpt-oss: "to=search_library" or "to=functions.x".
+    private static readonly Regex HarmonyRouteRegex = new(
+        @"\bto\s*=\s*(?:functions\s*\.\s*)?([A-Za-z_][\w-]*)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Harmony control tokens (<|start|>, <|message|>, <|call|>, <|end|>, ...) and the
+    // wrapper element around XML invoke blocks. Stripped so that even when nothing is
+    // recovered, the user is not shown raw scaffolding.
+    private static readonly Regex ControlTokenRegex = new(
+        @"<\|[^|>]*\|>",
+        RegexOptions.Compiled);
+
+    // The role/route header left behind once Harmony tokens are removed, e.g. the
+    // "assistant to=search_library" in "<|start|>assistant to=search_library<|message|>".
+    // Only applied when control tokens were actually present, so a normal reply opening
+    // with one of these words is untouched.
+    private static readonly Regex HarmonyHeaderRegex = new(
+        @"^\s*(?:assistant|developer|system|user|tool)\b\s*(?:to\s*=\s*(?:functions\s*\.\s*)?[\w.-]+)?\s*",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex FunctionCallsWrapperRegex = new(
+        @"<\s*/?\s*(?:[\w.-]+:)?function_calls\s*>",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     // An opening tag with no closing tag: the whole remainder is reasoning.
     private static readonly Regex UnclosedThinkRegex = new(
         @"<(think|thinking|reasoning)>.*$",
@@ -449,7 +483,14 @@ public class ChatCompletionService
         }
 
         var content = message.Content;
-        if (string.IsNullOrWhiteSpace(content) || content.IndexOf('{') < 0)
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return;
+        }
+
+        // '{' covers JSON calls, '<' covers XML invoke blocks and Harmony control
+        // tokens. Anything with neither is ordinary prose.
+        if (content.IndexOf('{') < 0 && content.IndexOf('<') < 0)
         {
             return;
         }
@@ -458,16 +499,13 @@ public class ChatCompletionService
         // happens to contain JSON is never mistaken for a tool call.
         var known = new HashSet<string>(tools.Select(t => t.Function.Name), StringComparer.OrdinalIgnoreCase);
 
-        foreach (var (json, start, length) in EnumerateJsonCandidates(content))
+        // Models emit tool calls as text in several conventions; try each in turn.
+        if (TryRecoverFromJson(content, known, out var calls, out var remainder)
+            || TryRecoverFromInvokeBlocks(content, known, out calls, out remainder)
+            || TryRecoverFromHarmony(content, known, out calls, out remainder))
         {
-            if (!TryParseToolCalls(json, known, out var calls, out var embeddedContent))
-            {
-                continue;
-            }
-
             message.ToolCalls = calls;
-            message.Content = embeddedContent
-                ?? (content[..start] + content[(start + length)..]).Trim();
+            message.Content = Tidy(remainder);
 
             _logger.LogWarning(
                 "Model '{Model}' emitted {Count} tool call(s) as text rather than structured output — "
@@ -476,6 +514,175 @@ public class ChatCompletionService
                 calls.Count);
             return;
         }
+
+        // Nothing recovered, but scaffolding may still be showing. Never leave raw
+        // control tokens in a reply the user reads.
+        var tidied = Tidy(content);
+        if (tidied.Length != content.Length)
+        {
+            _logger.LogWarning("Stripped tool-call scaffolding from '{Model}' reply.", model);
+            message.Content = tidied;
+        }
+    }
+
+    private static string Tidy(string text)
+    {
+        var hadControlTokens = ControlTokenRegex.IsMatch(text);
+
+        // A space, not an empty string: removing "<|message|>" outright would weld the
+        // route name onto the reply text ("to=whatever" + "hi" -> "whateverhi"), and the
+        // header pattern would then eat the reply along with the route.
+        text = ControlTokenRegex.Replace(text, " ");
+        text = FunctionCallsWrapperRegex.Replace(text, string.Empty);
+
+        if (hadControlTokens)
+        {
+            text = HarmonyHeaderRegex.Replace(text, string.Empty);
+            text = Regex.Replace(text, "[ \t]{2,}", " ");
+        }
+
+        return text.Trim();
+    }
+
+    private static bool TryRecoverFromJson(
+        string content,
+        HashSet<string> known,
+        out List<OpenAiToolCall> calls,
+        out string remainder)
+    {
+        foreach (var (json, start, length) in EnumerateJsonCandidates(content))
+        {
+            if (TryParseToolCalls(json, known, out calls, out var embeddedContent))
+            {
+                remainder = embeddedContent ?? content[..start] + content[(start + length)..];
+                return true;
+            }
+        }
+
+        calls = new List<OpenAiToolCall>();
+        remainder = content;
+        return false;
+    }
+
+    // <invoke name="search_library"><parameter name="query">car</parameter>...</invoke>
+    private static bool TryRecoverFromInvokeBlocks(
+        string content,
+        HashSet<string> known,
+        out List<OpenAiToolCall> calls,
+        out string remainder)
+    {
+        calls = new List<OpenAiToolCall>();
+        remainder = content;
+
+        var matches = InvokeBlockRegex.Matches(content);
+        if (matches.Count == 0)
+        {
+            return false;
+        }
+
+        var consumed = new List<(int Start, int Length)>();
+
+        foreach (Match match in matches)
+        {
+            var name = WebUtility.HtmlDecode(match.Groups[1].Value).Trim();
+            if (!known.Contains(name))
+            {
+                continue;
+            }
+
+            var arguments = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (Match parameter in InvokeParameterRegex.Matches(match.Groups[2].Value))
+            {
+                var key = WebUtility.HtmlDecode(parameter.Groups[1].Value).Trim();
+                if (key.Length > 0)
+                {
+                    // Values stay strings; the argument getters coerce them.
+                    arguments[key] = WebUtility.HtmlDecode(parameter.Groups[2].Value).Trim();
+                }
+            }
+
+            calls.Add(new OpenAiToolCall
+            {
+                Function = new OpenAiToolCallFunction
+                {
+                    Name = name,
+                    Arguments = JsonSerializer.Serialize(arguments)
+                }
+            });
+            consumed.Add((match.Index, match.Length));
+        }
+
+        if (calls.Count == 0)
+        {
+            return false;
+        }
+
+        remainder = RemoveSpans(content, consumed);
+        return true;
+    }
+
+    // Harmony routing: "<|start|>assistant to=search_library<|message|>{...}<|call|>"
+    private static bool TryRecoverFromHarmony(
+        string content,
+        HashSet<string> known,
+        out List<OpenAiToolCall> calls,
+        out string remainder)
+    {
+        calls = new List<OpenAiToolCall>();
+        remainder = content;
+
+        var route = HarmonyRouteRegex.Match(content);
+        if (!route.Success)
+        {
+            return false;
+        }
+
+        var name = route.Groups[1].Value;
+        if (!known.Contains(name))
+        {
+            return false;
+        }
+
+        // Arguments are whatever JSON object follows the route, if any.
+        var arguments = "{}";
+        var consumed = new List<(int Start, int Length)> { (route.Index, route.Length) };
+
+        foreach (var (json, start, length) in EnumerateJsonCandidates(content[route.Index..]))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                {
+                    arguments = json;
+                    consumed.Add((route.Index + start, length));
+                }
+            }
+            catch (JsonException)
+            {
+                // Not an arguments object; fall through to the empty default.
+            }
+
+            break;
+        }
+
+        calls.Add(new OpenAiToolCall
+        {
+            Function = new OpenAiToolCallFunction { Name = name, Arguments = arguments }
+        });
+
+        remainder = RemoveSpans(content, consumed);
+        return true;
+    }
+
+    private static string RemoveSpans(string text, List<(int Start, int Length)> spans)
+    {
+        foreach (var span in spans.OrderByDescending(s => s.Start))
+        {
+            text = text[..span.Start] + text[(span.Start + span.Length)..];
+        }
+
+        return text;
     }
 
     // Balanced JSON spans in order of appearance. Handles a bare object, a fenced code
