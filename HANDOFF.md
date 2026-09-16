@@ -1,6 +1,6 @@
 # ChatBot Plugin — Session Handoff
 
-Jellyfin plugin named "ChatBot" (codename **Cthuwu**) that embeds an Ollama-powered chat widget into the Jellyfin web UI, with library search + Jellyseerr request integration.
+Jellyfin plugin named "ChatBot" (codename **Cthuwu**) that embeds an AI chat widget into the Jellyfin web UI, with library search + Jellyseerr request integration. The AI backend is any OpenAI-compatible `/chat/completions` endpoint (Ollama's `/v1`, LM Studio, llama.cpp, vLLM, LiteLLM, OpenAI, ...).
 
 ## Repo layout
 
@@ -10,7 +10,7 @@ Jellyfin.Plugin.ChatBot/
   PluginServiceRegistrator.cs    # DI registrations (services + hosted StartupService)
   StartupService.cs              # Writes <script>/<link> into jellyfin-web/index.html (often fails on locked-down installs — fallback is JS Injector)
   Configuration/
-    PluginConfiguration.cs       # Ollama + Seerr settings, system prompt, limits
+    PluginConfiguration.cs       # AI endpoint + model chain + TMDB/Seerr settings, system prompt, limits. Migrate() carries legacy Ollama* keys over
     configPage.html              # Plugin admin page. Inline <script> MUST be inside #chatbot-config-page div (see Gotchas)
   Web/
     chatbot.js                   # Widget (fetches via ApiClient; badge, panel, request modal, library card click-through)
@@ -25,7 +25,8 @@ Jellyfin.Plugin.ChatBot/
       LibrarySearchResult.cs
       SeerrRequestDto.cs / SeerrSearchResult.cs
   Services/
-    OllamaService.cs             # /api/chat + tool-calling loop; /api/tags for model list
+    ChatCompletionService.cs     # POST {base}/chat/completions; model fallback chain + cooldowns; GET {base}/models
+    OpenAiModels.cs              # OpenAI wire DTOs + ToolArgumentsConverter
     LibrarySearchService.cs      # ILibraryManager wrapper. Uses reflection for User (see Gotchas)
     SeerrService.cs              # Jellyseerr client. X-Api-User acting-as flow, MemoryCache for user mapping
     RateLimiter.cs               # In-proc per-user token bucket keyed on Jellyfin GUID
@@ -46,7 +47,7 @@ The user runs Jellyfin on a remote machine; do not assume filesystem access to `
 ## Runtime topology
 
 - User → Jellyfin web UI (chatbot widget loaded via JS Injector plugin, snippet:  `<link rel="stylesheet" href="/ChatBot/Widget/chatbot.css"><script src="/ChatBot/Widget/chatbot.js" defer></script>`).
-- Widget → `/ChatBot/Chat` → Ollama (server-side fetch to configured Ollama URL, default `http://localhost:11434`).
+- Widget → `/ChatBot/Chat` → configured AI endpoint (server-side fetch to `ApiBaseUrl`, default `http://localhost:11434/v1`).
 - Request flow: widget → `/ChatBot/Seerr/RequestOptions` (loads modal) → `/ChatBot/Seerr/Request` → Jellyseerr (server-side; Jellyseerr is behind proxy, Jellyfin reaches it via internal hostname).
 
 The LLM has two tools: `search_library`, `list_genres`, and `search_seerr`. Notably there is **no** `request_media` tool — requests must be user-initiated via the UI button. This is a deliberate prompt-injection guard (comment in `ChatController.BuildTools`).
@@ -74,16 +75,30 @@ Jellyfin's admin dashboard only evaluates scripts contained inside the `data-rol
 ### 4. Widget injection
 `StartupService.InjectWidget` mutates `jellyfin-web/index.html` in place. On most installs (Docker, Fedora rpm, systemd unit with read-only web path) this throws `UnauthorizedAccessException` — we log and move on. Production fallback is the JavaScript Injector plugin. The user *is* using JS Injector.
 
-### 5. Do **not** add `request_media` as an LLM tool
+### 5. OpenAI tool-call wire quirks
+Two things bite when swapping backends:
+- `tool_calls[].function.arguments` is a **JSON-encoded string** per spec, but some servers emit a bare object. `ToolArgumentsConverter` normalizes both to a string; `ChatController.ParseArguments` parses it back (and unwraps one layer of double-encoding, which models occasionally produce). All the `GetArg*` helpers still take a `JsonElement` and are unchanged.
+- A `role: "tool"` message **must** carry `tool_call_id` matching the call it answers, and the assistant message with the `tool_calls` must be echoed back before it. Strict servers (vLLM, LiteLLM, OpenAI) 400 otherwise. Servers that omit the id get a synthesized one in `NormalizeToolCallIds`.
+
+### 6. Optional request parameters degrade instead of failing
+Backends disagree about which optional parameters they accept, so `SendWithDegradationAsync` drops them one at a time on a 400 before giving up on a model: `reasoning_effort` first (cosmetic), then `tools` (costs library search — the reply still arrives, but tool-less). Only then does the model chain advance.
+
+### 7. `EnableThinking` is not Ollama's `think` any more
+The native `"think": true` / `"thinking"` response field has no cross-vendor equivalent. The setting now sends `reasoning_effort: "medium"`, and `StripReasoning` keeps reasoning out of the visible reply three ways: reading `reasoning_content` (vLLM, DeepSeek, LiteLLM) or `reasoning` (OpenRouter), and regex-stripping inline `<think>` blocks for backends that do neither. Those fields are also cleared before the message is echoed back into the next request.
+
+### 8. Config migration is version-gated
+`XmlSerializer` cannot distinguish an absent element from one holding the default value, so `PluginConfiguration.ConfigVersion` gates the migration instead. `Plugin`'s constructor calls `Migrate()` and saves if it changed anything. The `[Obsolete]` `OllamaUrl`/`OllamaModel` properties exist *only* for that migration — do not delete them, or upgrading installs silently reset to defaults.
+
+### 9. Do **not** add `request_media` as an LLM tool
 Prompt injection in media metadata / user input would let an attacker trigger auto-requests. The Request button is user-only, by design. See comment in `ChatController.BuildTools`.
 
-### 6. Seerr date parsing
+### 10. Seerr date parsing
 `releaseDate` / `firstAirDate` can be empty strings. Length-check before substring or it throws `ArgumentOutOfRangeException`.
 
-### 7. TV requests need `seasons`
+### 11. TV requests need `seasons`
 Bare `{mediaType: "tv", mediaId: N}` to Jellyseerr returns 400. Send `seasons: "all"` or an int array. Handled in `SeerrService.RequestMediaAsync`.
 
-### 8. Browser cache on HTML edits
+### 12. Browser cache on HTML edits
 Embedded HTML is served fresh from the DLL on each restart, but the browser caches aggressively. Always hard-refresh (Ctrl+Shift+R) after deploying.
 
 ## Security posture
@@ -105,15 +120,16 @@ Patched:
 - **LOW-8** Queries logged as length, not value.
 - **LOW-10** `[RequestSizeLimit]` on state-changing endpoints.
 
-Intentionally deferred (user hasn't asked): LOW-2 (markdown regex hardening), LOW-3 (OllamaApiKey field), LOW-7 (atomic `index.html` write + uninstall hook), LOW-9 (Origin check), LOW-11 (doc-only).
+Intentionally deferred (user hasn't asked): LOW-2 (markdown regex hardening), LOW-7 (atomic `index.html` write + uninstall hook), LOW-9 (Origin check), LOW-11 (doc-only).
 
 ## Features currently shipped
 
-- Chat with library + genre + Seerr search via Ollama.
+- Chat with library + genre + Seerr search via any OpenAI-compatible endpoint.
+- Model fallback chain: primary `Model` then `FallbackModels` in order, with a 60s per-model cooldown after a failure and the answering model pinned for the rest of a turn's tool rounds.
 - Floating "Cthuwu" badge (bottom-right, squid icon, purple gradient) — hidden during video playback.
 - Request modal with server / quality profile / root folder dropdowns, TV seasons with "All" master checkbox.
 - Clickable library result cards → navigate to `#/details?id=<id>&serverId=<sid>`.
-- Config page with Test Ollama + Test Jellyseerr buttons.
+- Config page with Test AI + Test Jellyseerr buttons.
 - Personality-laden default system prompt (light occult-cute, one flavor-touch per reply).
 
 ## Known environment
