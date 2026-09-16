@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Security.Claims;
 using System.Text.Json;
@@ -625,22 +626,65 @@ public class ChatController : ControllerBase
         }
     }
 
-    private static string GetArgString(JsonElement args, string key)
+    // Tool arguments are model output, not a trusted schema: the declared type is a hint
+    // the model is free to ignore. Every getter below coerces what it is given and falls
+    // back to the "absent" value rather than throwing, since an exception here aborts the
+    // whole tool call and the user just sees "that tool failed".
+    private static bool TryGetArg(JsonElement args, string key, out JsonElement value)
     {
-        if (args.ValueKind == JsonValueKind.Object && args.TryGetProperty(key, out var val))
+        if (args.ValueKind == JsonValueKind.Object && args.TryGetProperty(key, out value)
+            && value.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined))
         {
-            return val.GetString() ?? string.Empty;
+            return true;
         }
 
-        return string.Empty;
+        value = default;
+        return false;
+    }
+
+    private static string GetArgString(JsonElement args, string key)
+    {
+        if (!TryGetArg(args, key, out var val))
+        {
+            return string.Empty;
+        }
+
+        return val.ValueKind switch
+        {
+            JsonValueKind.String => val.GetString() ?? string.Empty,
+            // Models sometimes answer a string parameter with a number or bool.
+            JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False => val.GetRawText(),
+            // ...or with a list, where the tools document a comma-separated string.
+            JsonValueKind.Array => string.Join(
+                ",",
+                val.EnumerateArray()
+                   .Select(e => e.ValueKind == JsonValueKind.String ? e.GetString() : e.GetRawText())
+                   .Where(v => !string.IsNullOrWhiteSpace(v))),
+            _ => string.Empty
+        };
     }
 
     private static int GetArgInt(JsonElement args, string key)
     {
-        if (args.ValueKind == JsonValueKind.Object && args.TryGetProperty(key, out var val))
+        if (!TryGetArg(args, key, out var val))
         {
-            if (val.ValueKind == JsonValueKind.Number) return val.GetInt32();
-            if (val.ValueKind == JsonValueKind.String && int.TryParse(val.GetString(), out var i)) return i;
+            return 0;
+        }
+
+        // A JSON number that isn't an integer (limit: 10.0) makes GetInt32 throw, so round.
+        if (val.ValueKind == JsonValueKind.Number)
+        {
+            if (val.TryGetInt32(out var i)) return i;
+            if (val.TryGetDouble(out var d) && d >= int.MinValue && d <= int.MaxValue) return (int)Math.Round(d);
+            return 0;
+        }
+
+        if (val.ValueKind == JsonValueKind.String)
+        {
+            var raw = val.GetString();
+            if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var i)) return i;
+            if (double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var d)
+                && d >= int.MinValue && d <= int.MaxValue) return (int)Math.Round(d);
         }
 
         return 0;
@@ -648,10 +692,16 @@ public class ChatController : ControllerBase
 
     private static float GetArgFloat(JsonElement args, string key)
     {
-        if (args.ValueKind == JsonValueKind.Object && args.TryGetProperty(key, out var val))
+        if (!TryGetArg(args, key, out var val))
         {
-            if (val.ValueKind == JsonValueKind.Number) return val.GetSingle();
-            if (val.ValueKind == JsonValueKind.String && float.TryParse(val.GetString(), out var f)) return f;
+            return 0f;
+        }
+
+        if (val.ValueKind == JsonValueKind.Number && val.TryGetSingle(out var f)) return f;
+        if (val.ValueKind == JsonValueKind.String
+            && float.TryParse(val.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed))
+        {
+            return parsed;
         }
 
         return 0f;
@@ -659,10 +709,16 @@ public class ChatController : ControllerBase
 
     private static double GetArgDouble(JsonElement args, string key)
     {
-        if (args.ValueKind == JsonValueKind.Object && args.TryGetProperty(key, out var val))
+        if (!TryGetArg(args, key, out var val))
         {
-            if (val.ValueKind == JsonValueKind.Number) return val.GetDouble();
-            if (val.ValueKind == JsonValueKind.String && double.TryParse(val.GetString(), out var d)) return d;
+            return 0d;
+        }
+
+        if (val.ValueKind == JsonValueKind.Number && val.TryGetDouble(out var d)) return d;
+        if (val.ValueKind == JsonValueKind.String
+            && double.TryParse(val.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed))
+        {
+            return parsed;
         }
 
         return 0d;
