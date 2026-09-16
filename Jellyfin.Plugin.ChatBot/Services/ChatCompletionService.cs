@@ -225,8 +225,9 @@ public class ChatCompletionService
         var message = result?.Choices?.FirstOrDefault()?.Message
             ?? throw new ChatBackendException("Backend returned no choices.", true, null);
 
-        NormalizeToolCallIds(message);
         StripReasoning(message, model);
+        TryRecoverToolCalls(message, tools, model);
+        NormalizeToolCallIds(message);
         return message;
     }
 
@@ -434,6 +435,224 @@ public class ChatCompletionService
         }
 
         message.Content = cleaned;
+    }
+
+    // Not every backend parses a model's tool-call syntax: Ollama templates without a
+    // tool parser and vLLM without --enable-auto-tool-choice both hand the call back as
+    // plain text, so the user sees raw JSON in the chat bubble instead of results.
+    // Recover the calls when the response carried none but the content looks like one.
+    private void TryRecoverToolCalls(OpenAiChatMessage message, List<OpenAiTool>? tools, string model)
+    {
+        if (message.ToolCalls is { Count: > 0 } || tools is not { Count: > 0 })
+        {
+            return;
+        }
+
+        var content = message.Content;
+        if (string.IsNullOrWhiteSpace(content) || content.IndexOf('{') < 0)
+        {
+            return;
+        }
+
+        // Only names the model was actually offered count, so an ordinary reply that
+        // happens to contain JSON is never mistaken for a tool call.
+        var known = new HashSet<string>(tools.Select(t => t.Function.Name), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (json, start, length) in EnumerateJsonCandidates(content))
+        {
+            if (!TryParseToolCalls(json, known, out var calls, out var embeddedContent))
+            {
+                continue;
+            }
+
+            message.ToolCalls = calls;
+            message.Content = embeddedContent
+                ?? (content[..start] + content[(start + length)..]).Trim();
+
+            _logger.LogWarning(
+                "Model '{Model}' emitted {Count} tool call(s) as text rather than structured output — "
+                + "the backend is not parsing tool calls for this model. Recovered them from the reply.",
+                model,
+                calls.Count);
+            return;
+        }
+    }
+
+    // Balanced JSON spans in order of appearance. Handles a bare object, a fenced code
+    // block, and marker-wrapped forms (<tool_call>{...}</tool_call>, [TOOL_CALLS] [...])
+    // alike, since all that matters is the JSON between the delimiters.
+    private static IEnumerable<(string Json, int Start, int Length)> EnumerateJsonCandidates(string text)
+    {
+        for (var i = 0; i < text.Length; i++)
+        {
+            if (text[i] != '{' && text[i] != '[')
+            {
+                continue;
+            }
+
+            var end = FindBalancedEnd(text, i);
+            if (end < 0)
+            {
+                continue;
+            }
+
+            yield return (text[i..(end + 1)], i, end - i + 1);
+            i = end;
+        }
+    }
+
+    private static int FindBalancedEnd(string text, int start)
+    {
+        var depth = 0;
+        var inString = false;
+        var escaped = false;
+
+        for (var i = start; i < text.Length; i++)
+        {
+            var c = text[i];
+
+            if (inString)
+            {
+                if (escaped) escaped = false;
+                else if (c == '\\') escaped = true;
+                else if (c == '"') inString = false;
+                continue;
+            }
+
+            switch (c)
+            {
+                case '"':
+                    inString = true;
+                    break;
+                case '{':
+                case '[':
+                    depth++;
+                    break;
+                case '}':
+                case ']':
+                    depth--;
+                    if (depth == 0) return i;
+                    if (depth < 0) return -1;
+                    break;
+            }
+        }
+
+        return -1;
+    }
+
+    // Accepts the shapes models actually emit: a whole assistant message object with a
+    // tool_calls array (what Gemma produces), a bare array of calls, or a single call.
+    private static bool TryParseToolCalls(
+        string json,
+        HashSet<string> known,
+        out List<OpenAiToolCall> calls,
+        out string? embeddedContent)
+    {
+        calls = new List<OpenAiToolCall>();
+        embeddedContent = null;
+
+        JsonDocument doc;
+        try
+        {
+            doc = JsonDocument.Parse(json);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+
+        using (doc)
+        {
+            var root = doc.RootElement;
+            JsonElement array;
+
+            if (root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("tool_calls", out var toolCalls)
+                && toolCalls.ValueKind == JsonValueKind.Array)
+            {
+                array = toolCalls;
+
+                // The model wrapped its own prose in the blob; keep it as the reply text.
+                if (root.TryGetProperty("content", out var inner) && inner.ValueKind == JsonValueKind.String)
+                {
+                    embeddedContent = inner.GetString();
+                }
+            }
+            else if (root.ValueKind == JsonValueKind.Array)
+            {
+                array = root;
+            }
+            else if (root.ValueKind == JsonValueKind.Object)
+            {
+                if (TryReadToolCall(root, known, out var single))
+                {
+                    calls.Add(single);
+                    return true;
+                }
+
+                return false;
+            }
+            else
+            {
+                return false;
+            }
+
+            foreach (var element in array.EnumerateArray())
+            {
+                if (TryReadToolCall(element, known, out var call))
+                {
+                    calls.Add(call);
+                }
+            }
+
+            return calls.Count > 0;
+        }
+    }
+
+    private static bool TryReadToolCall(JsonElement element, HashSet<string> known, out OpenAiToolCall call)
+    {
+        call = new OpenAiToolCall();
+
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        // Either {name, arguments} or the nested {function: {name, arguments}} form.
+        var fn = element;
+        if (element.TryGetProperty("function", out var nested) && nested.ValueKind == JsonValueKind.Object)
+        {
+            fn = nested;
+        }
+
+        if (!fn.TryGetProperty("name", out var nameElement) || nameElement.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        var name = nameElement.GetString();
+        if (string.IsNullOrEmpty(name) || !known.Contains(name))
+        {
+            return false;
+        }
+
+        var arguments = "{}";
+        if (fn.TryGetProperty("arguments", out var argsElement) || fn.TryGetProperty("parameters", out argsElement))
+        {
+            arguments = argsElement.ValueKind == JsonValueKind.String
+                ? argsElement.GetString() ?? "{}"
+                : argsElement.GetRawText();
+        }
+
+        call = new OpenAiToolCall
+        {
+            Id = element.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String
+                ? id.GetString() ?? string.Empty
+                : string.Empty,
+            Function = new OpenAiToolCallFunction { Name = name, Arguments = arguments }
+        };
+
+        return true;
     }
 
     // 401/403 mean the key or endpoint is wrong — identical for every model, so don't
