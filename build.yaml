@@ -1,8 +1,8 @@
 ---
 name: "ChatBot"
 guid: "a5b6c7d8-e9f0-4a1b-8c2d-3e4f5a6b7c8d"
-version: "1.2.0.0"
-targetAbi: "10.10.0.0"
+version: "2.0.0.0"
+targetAbi: "12.0.0.0"
 owner: "JellyfinChatBot"
 overview: "AI chatbot plugin for any OpenAI-compatible endpoint, with library search, recommendations, and Jellyseerr integration"
 description: "Adds an AI chatbot to Jellyfin that can search your media library, give personalized recommendations based on watch history, discover content via TMDB, and help request new media through Jellyseerr/Overseerr."
@@ -10,6 +10,13 @@ category: "General"
 artifacts:
   - "Jellyfin.Plugin.ChatBot.dll"
 changelog: |
+  ## v2.0.0.0
+  - Requires Jellyfin 12.0 or newer; plugin now targets .NET 10
+  - Builds against Jellyfin.Controller 12.0.0 (works on 12.0 and 12.1)
+  - Drops support for Jellyfin 10.x, which cannot load .NET 10 plugins
+  - Tool arguments are coerced rather than throwing: a model sending
+    limit: 10.0 no longer kills the tool call
+
   ## v1.2.0.0
   - Chat now works with any OpenAI-compatible endpoint (Ollama /v1, LM Studio,
     llama.cpp, vLLM, LiteLLM, OpenAI, OpenRouter) instead of Ollama's native API

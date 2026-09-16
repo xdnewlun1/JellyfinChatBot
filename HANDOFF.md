@@ -40,7 +40,7 @@ sec_findings.md                  # Pen-test report (already addressed)
 dotnet build -c Release
 ```
 
-DLL lands at `Jellyfin.Plugin.ChatBot/bin/Release/net8.0/Jellyfin.Plugin.ChatBot.dll`. Deploy by copying to the user's Jellyfin plugins dir (usually `/var/lib/jellyfin/plugins/ChatBot_*/`) and restarting Jellyfin. `configPage.html`, `chatbot.js`, `chatbot.css` are embedded resources — *any* edit requires rebuild + redeploy + hard-refresh.
+DLL lands at `Jellyfin.Plugin.ChatBot/bin/Release/net10.0/Jellyfin.Plugin.ChatBot.dll`. Deploy by copying to the user's Jellyfin plugins dir (usually `/var/lib/jellyfin/plugins/ChatBot_*/`) and restarting Jellyfin. `configPage.html`, `chatbot.js`, `chatbot.css` are embedded resources — *any* edit requires rebuild + redeploy + hard-refresh.
 
 The user runs Jellyfin on a remote machine; do not assume filesystem access to `jellyfin-web/` or plugins dir from this workspace. They deploy DLLs themselves.
 
@@ -64,10 +64,10 @@ The LLM has two tools: `search_library`, `list_genres`, and `search_seerr`. Nota
 ### 1. Inline `<script>` must be inside `#chatbot-config-page`
 Jellyfin's admin dashboard only evaluates scripts contained inside the `data-role="page"` root div. A `<script>` tag after the closing `</div>` is silently skipped. Symptom: Save reloads the page clearing all inputs, Test button does nothing, no console errors. Fix already applied: `configPage.html` closes `</div>` after `</script>`.
 
-### 2. Jellyfin 10.11 moved the `User` type
-10.10 has `Jellyfin.Data.Entities.User`; 10.11 has `Jellyfin.Database.Implementations.Entities.User`. The plugin targets Jellyfin.Controller 10.10.6 (see `.csproj`). On 10.11 servers, any static reference to `User` causes `TypeLoadException` at JIT time.
+### 2. The `User` type moved, and the reflection that works around it is now optional
+10.10 had `Jellyfin.Data.Entities.User`; 10.11 and 12.x have `Jellyfin.Database.Implementations.Entities.User`. `LibrarySearchService` and `WatchHistoryService` therefore call `IUserManager.GetUserById` via `MethodInfo.Invoke` and set `InternalItemsQuery.User` via `PropertyInfo.SetValue`.
 
-`LibrarySearchService` avoids this by calling `IUserManager.GetUserById` via `MethodInfo.Invoke` and setting `InternalItemsQuery.User` via `PropertyInfo.SetValue`. Do not replace with direct `_userManager.GetUserById(id)` — it will break on 10.11. If you bump the SDK target, you can remove the reflection.
+Now that the plugin targets Jellyfin 12.0 only (see `.csproj`), that reflection is no longer load-bearing and could be replaced with direct calls. It is kept because it works and the targets were verified present in 12.0/12.1. If you do simplify it, note that `WatchHistoryService` resolves `ItemSortBy` and `SortOrder` by *bare type name* across every loaded assembly — verified to have exactly one public match each in 12.1.0, but that is the fragile part, not the `User` handling.
 
 ### 3. `GetItemList` vs `GetItemsResult`
 `ILibraryManager.GetItemList(InternalItemsQuery)` had a signature change between Jellyfin patches (`List<BaseItem>` → `IReadOnlyList<BaseItem>`), causing `MissingMethodException`. We use `GetItemsResult(query).Items` which has been stable.
@@ -135,7 +135,7 @@ Intentionally deferred (user hasn't asked): LOW-2 (markdown regex hardening), LO
 ## Known environment
 
 - User: Xander Newlun, runs `cthuwusecurity` Jellyfin with Jellyseerr behind a reverse proxy at `jellyseerr.home.cthuwusecurity.com`.
-- Jellyfin version: 10.11.8 (as of the last session).
+- Jellyfin version: 12.x (user confirmed their server runs Jellyfin 12; the plugin targets 12.0.0 so it installs on 12.0 and 12.1).
 - Uses JS Injector + File Transformation plugins for the widget injection path.
 - Other active plugins include Jellyfin Enhanced, JellyTag — their log lines frequently interleave with ours.
 
@@ -145,11 +145,11 @@ Intentionally deferred (user hasn't asked): LOW-2 (markdown regex hardening), LO
 - Adding an endpoint? Match existing pattern: `[Authorize]` required, validate inputs, return `BadRequest` with short generic messages, log details server-side.
 - New LLM tool? Define in `ChatController.BuildTools` + handle in `ExecuteToolAsync`. Do **not** let it mutate state.
 - Config change? Hook `Plugin.UpdateConfiguration` if the change needs cache invalidation or side effects.
-- Version compatibility: test against both 10.10 and 10.11 mentally. If you reference anything from `Jellyfin.Data.Entities` directly, it will break on 10.11. Use reflection or bump SDK target.
+- Version compatibility: the plugin targets `net10.0` + Jellyfin.Controller 12.0.0, with `targetAbi: 12.0.0.0`. Jellyfin 10.x cannot load it at all — .NET 10 assemblies and changed plugin interfaces. `release.yml` pins `dotnet-version: 10.0.x` to match; bumping the target framework means bumping that too.
 
 ## Common user requests (history from last session)
 
 - "Test button doesn't work" → always check: script inside page div, DLL actually redeployed, hard-refreshed.
 - "Search doesn't find thematic stuff" → `SearchTerm` matches title only. Query manually against overview too (already done).
 - "Requests fail with 400" → usually missing `seasons` for TV or Jellyseerr user not linked.
-- "No results suddenly" → likely version skew (10.11 `User` type issue).
+- "No results suddenly" → likely version skew in the reflected `User` handling (see Gotcha 2).

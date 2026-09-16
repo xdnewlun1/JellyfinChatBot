@@ -77,7 +77,7 @@ The chat badge is a small floating button. It hides automatically when anyone is
 
 ## Requirements
 
-- **Jellyfin 10.10+**
+- **Jellyfin 12.0+** (the plugin targets .NET 10; Jellyfin 10.x cannot load it)
 - **An OpenAI-compatible chat endpoint** your Jellyfin server can reach — e.g. [Ollama](https://ollama.com) (its `/v1` API), LM Studio, llama.cpp, vLLM, LiteLLM, or a hosted provider
 - **[TMDB API key](https://www.themoviedb.org/settings/api)** *(optional)* — free, enables discovery and recommendation tools
 - **Jellyseerr or Overseerr** *(optional)* — only needed if you want the request feature
@@ -110,7 +110,7 @@ The chat badge is a small floating button. It hides automatically when anyone is
 
 ```bash
 dotnet build -c Release
-cp Jellyfin.Plugin.ChatBot/bin/Release/net8.0/Jellyfin.Plugin.ChatBot.dll \
+cp Jellyfin.Plugin.ChatBot/bin/Release/net10.0/Jellyfin.Plugin.ChatBot.dll \
    /var/lib/jellyfin/plugins/ChatBot/
 ```
 
