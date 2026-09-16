@@ -1,12 +1,34 @@
+using System;
 using MediaBrowser.Model.Plugins;
 
 namespace Jellyfin.Plugin.ChatBot.Configuration;
 
 public class PluginConfiguration : BasePluginConfiguration
 {
-    public string OllamaUrl { get; set; } = "http://localhost:11434";
+    // Base URL of any OpenAI-compatible endpoint. Ollama serves one at /v1, so an
+    // existing Ollama install just gains the suffix.
+    public string ApiBaseUrl { get; set; } = "http://localhost:11434/v1";
 
-    public string OllamaModel { get; set; } = "llama3.2";
+    // Bearer token. Leave empty for local backends that don't authenticate.
+    public string ApiKey { get; set; } = string.Empty;
+
+    public string Model { get; set; } = "llama3.2";
+
+    // Comma/newline separated. Tried in order when the primary model fails.
+    public string FallbackModels { get; set; } = string.Empty;
+
+    public int RequestTimeoutSeconds { get; set; } = 120;
+
+    // Bumped by Migrate. 0 means the config predates the OpenAI-compatible endpoint.
+    public int ConfigVersion { get; set; }
+
+    // Legacy settings kept only so existing installs can be migrated on load.
+    // Do not read these anywhere else; Migrate clears them once carried over.
+    [Obsolete("Migrated to ApiBaseUrl.")]
+    public string OllamaUrl { get; set; } = string.Empty;
+
+    [Obsolete("Migrated to Model.")]
+    public string OllamaModel { get; set; } = string.Empty;
 
     public string SystemPrompt { get; set; } =
         "You are Cthuwu, the resident eldritch-but-cozy media familiar of a Jellyfin server run by cthuwusecurity. " +
@@ -65,4 +87,46 @@ public class PluginConfiguration : BasePluginConfiguration
     public int MaxConversationTurns { get; set; } = 20;
 
     public int SearchResultLimit { get; set; } = 10;
+
+    // Carries a pre-OpenAI config across the rename. XmlSerializer can't tell an absent
+    // element from one holding the default value, so the version marker does it instead.
+    public bool Migrate()
+    {
+        if (ConfigVersion >= 1)
+        {
+            return false;
+        }
+
+        ConfigVersion = 1;
+
+#pragma warning disable CS0618 // Legacy properties exist for exactly this.
+        var legacyUrl = OllamaUrl;
+        var legacyModel = OllamaModel;
+        OllamaUrl = string.Empty;
+        OllamaModel = string.Empty;
+#pragma warning restore CS0618
+
+        if (string.IsNullOrWhiteSpace(legacyUrl) && string.IsNullOrWhiteSpace(legacyModel))
+        {
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(legacyUrl))
+        {
+            var url = legacyUrl.Trim().TrimEnd('/');
+            if (!url.EndsWith("/v1", StringComparison.OrdinalIgnoreCase))
+            {
+                url += "/v1";
+            }
+
+            ApiBaseUrl = url;
+        }
+
+        if (!string.IsNullOrWhiteSpace(legacyModel))
+        {
+            Model = legacyModel.Trim();
+        }
+
+        return true;
+    }
 }

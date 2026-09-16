@@ -19,7 +19,7 @@ namespace Jellyfin.Plugin.ChatBot.Api;
 [Route("ChatBot/Chat")]
 public class ChatController : ControllerBase
 {
-    private readonly OllamaService _ollamaService;
+    private readonly ChatCompletionService _chatService;
     private readonly LibrarySearchService _librarySearchService;
     private readonly SeerrService _seerrService;
     private readonly TmdbService _tmdbService;
@@ -27,14 +27,14 @@ public class ChatController : ControllerBase
     private readonly ILogger<ChatController> _logger;
 
     public ChatController(
-        OllamaService ollamaService,
+        ChatCompletionService chatService,
         LibrarySearchService librarySearchService,
         SeerrService seerrService,
         TmdbService tmdbService,
         WatchHistoryService watchHistoryService,
         ILogger<ChatController> logger)
     {
-        _ollamaService = ollamaService;
+        _chatService = chatService;
         _librarySearchService = librarySearchService;
         _seerrService = seerrService;
         _tmdbService = tmdbService;
@@ -76,18 +76,18 @@ public class ChatController : ControllerBase
                 return BadRequest("Message exceeds maximum length.");
             }
 
-            // Validate role to prevent injection into Ollama prompt
+            // Validate role to prevent injection into the model prompt
             if (msg.Role != "user" && msg.Role != "assistant")
             {
                 return BadRequest("Invalid message role.");
             }
         }
 
-        // Build the Ollama message list
-        var messages = new List<OllamaChatMessage>();
+        // Build the chat completion message list
+        var messages = new List<OpenAiChatMessage>();
 
         // Add system prompt
-        messages.Add(new OllamaChatMessage
+        messages.Add(new OpenAiChatMessage
         {
             Role = "system",
             Content = config.SystemPrompt
@@ -103,7 +103,7 @@ public class ChatController : ControllerBase
 
         foreach (var msg in userMessages)
         {
-            messages.Add(new OllamaChatMessage
+            messages.Add(new OpenAiChatMessage
             {
                 Role = msg.Role,
                 Content = msg.Content
@@ -115,27 +115,44 @@ public class ChatController : ControllerBase
 
         var chatResponse = new ChatResponse();
 
+        // Once a model answers, stay on it for the remaining tool rounds — switching
+        // models mid-conversation produces incoherent replies.
+        string? pinnedModel = null;
+
         // Allow up to 5 tool-call rounds to prevent infinite loops
         for (int round = 0; round < 5; round++)
         {
-            var ollamaResponse = await _ollamaService.ChatAsync(messages, tools, cancellationToken)
-                .ConfigureAwait(false);
-
-            var assistantMessage = ollamaResponse.Message;
-            if (assistantMessage == null)
+            ChatCompletionResult completion;
+            try
             {
-                chatResponse.Reply = "I'm sorry, I didn't get a response. Please try again.";
+                completion = await _chatService.ChatAsync(messages, tools, pinnedModel, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Don't leak endpoint URLs, keys or upstream error bodies to the client.
+                _logger.LogError(ex, "Chat completion failed for all configured models.");
+                chatResponse.Reply = "I couldn't reach the AI backend just now. Please try again in a moment.";
                 return Ok(chatResponse);
             }
+
+            pinnedModel = completion.Model;
+            var assistantMessage = completion.Message;
 
             // If no tool calls, we have the final response
             if (assistantMessage.ToolCalls == null || assistantMessage.ToolCalls.Count == 0)
             {
-                chatResponse.Reply = assistantMessage.Content;
+                chatResponse.Reply = assistantMessage.Content ?? string.Empty;
                 return Ok(chatResponse);
             }
 
-            // Add assistant message with tool calls to context
+            // Add assistant message with tool calls to context. Some backends reject a
+            // null content field on the echo, so normalize it.
+            assistantMessage.Content ??= string.Empty;
             messages.Add(assistantMessage);
 
             // Process each tool call
@@ -144,9 +161,10 @@ public class ChatController : ControllerBase
                 var toolResult = await ExecuteToolAsync(toolCall, chatResponse, userId, cancellationToken)
                     .ConfigureAwait(false);
 
-                messages.Add(new OllamaChatMessage
+                messages.Add(new OpenAiChatMessage
                 {
                     Role = "tool",
+                    ToolCallId = toolCall.Id,
                     Content = toolResult
                 });
             }
@@ -178,64 +196,64 @@ public class ChatController : ControllerBase
     {
         try
         {
-            var models = await _ollamaService.GetModelsAsync(cancellationToken).ConfigureAwait(false);
-            return Ok(string.Join(", ", models));
+            var summary = await _chatService.TestAsync(cancellationToken).ConfigureAwait(false);
+            return Ok(summary);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to connect to Ollama");
+            _logger.LogError(ex, "Failed to reach the AI endpoint");
             // Don't leak internal exception details to the client
-            return StatusCode(500, "Failed to connect to Ollama. Check the URL and ensure Ollama is running.");
+            return StatusCode(500, "Failed to reach the AI endpoint. Check the base URL, API key and model names, and save settings first.");
         }
     }
 
-    private List<OllamaTool> BuildTools()
+    private List<OpenAiTool> BuildTools()
     {
         var config = Plugin.Instance!.Configuration;
-        var tools = new List<OllamaTool>
+        var tools = new List<OpenAiTool>
         {
-            new OllamaTool
+            new OpenAiTool
             {
-                Function = new OllamaToolFunction
+                Function = new OpenAiToolFunction
                 {
                     Name = "search_library",
                     Description = "Search the Jellyfin media library for movies and TV shows. Matches against title and overview/description text. Supports filtering by genre, year range, tags, and minimum community rating. Use this when the user asks about available content.",
-                    Parameters = new OllamaToolParameters
+                    Parameters = new OpenAiToolParameters
                     {
-                        Properties = new Dictionary<string, OllamaToolProperty>
+                        Properties = new Dictionary<string, OpenAiToolProperty>
                         {
-                            ["query"] = new OllamaToolProperty
+                            ["query"] = new OpenAiToolProperty
                             {
                                 Type = "string",
                                 Description = "Keyword to match in title or overview. Optional if other filters are supplied."
                             },
-                            ["media_type"] = new OllamaToolProperty
+                            ["media_type"] = new OpenAiToolProperty
                             {
                                 Type = "string",
                                 Description = "Restrict to 'movie' or 'series'. Omit for both.",
                                 Enum = new List<string> { "movie", "series" }
                             },
-                            ["genre"] = new OllamaToolProperty
+                            ["genre"] = new OpenAiToolProperty
                             {
                                 Type = "string",
                                 Description = "Exact genre name (e.g. 'Science Fiction', 'Comedy'). Call list_genres first if unsure which genres exist."
                             },
-                            ["year_min"] = new OllamaToolProperty
+                            ["year_min"] = new OpenAiToolProperty
                             {
                                 Type = "number",
                                 Description = "Minimum production year (e.g. 2020)."
                             },
-                            ["year_max"] = new OllamaToolProperty
+                            ["year_max"] = new OpenAiToolProperty
                             {
                                 Type = "number",
                                 Description = "Maximum production year (e.g. 2024)."
                             },
-                            ["tags"] = new OllamaToolProperty
+                            ["tags"] = new OpenAiToolProperty
                             {
                                 Type = "string",
                                 Description = "Filter by a tag on the media item."
                             },
-                            ["min_community_rating"] = new OllamaToolProperty
+                            ["min_community_rating"] = new OpenAiToolProperty
                             {
                                 Type = "number",
                                 Description = "Minimum community rating (0-10 scale, e.g. 7.5)."
@@ -245,17 +263,17 @@ public class ChatController : ControllerBase
                     }
                 }
             },
-            new OllamaTool
+            new OpenAiTool
             {
-                Function = new OllamaToolFunction
+                Function = new OpenAiToolFunction
                 {
                     Name = "list_genres",
                     Description = "List all genres present in the Jellyfin library. Use this before search_library when the user asks for content by theme/genre and you need the exact genre name.",
-                    Parameters = new OllamaToolParameters
+                    Parameters = new OpenAiToolParameters
                     {
-                        Properties = new Dictionary<string, OllamaToolProperty>
+                        Properties = new Dictionary<string, OpenAiToolProperty>
                         {
-                            ["media_type"] = new OllamaToolProperty
+                            ["media_type"] = new OpenAiToolProperty
                             {
                                 Type = "string",
                                 Description = "Restrict to 'movie' or 'series'. Omit for both.",
@@ -266,23 +284,23 @@ public class ChatController : ControllerBase
                     }
                 }
             },
-            new OllamaTool
+            new OpenAiTool
             {
-                Function = new OllamaToolFunction
+                Function = new OpenAiToolFunction
                 {
                     Name = "get_watch_history",
                     Description = "Get the user's recently watched movies and TV shows, sorted by most recently played. Returns genres and ratings for each item. Use this to understand the user's preferences for personalized recommendations.",
-                    Parameters = new OllamaToolParameters
+                    Parameters = new OpenAiToolParameters
                     {
-                        Properties = new Dictionary<string, OllamaToolProperty>
+                        Properties = new Dictionary<string, OpenAiToolProperty>
                         {
-                            ["media_type"] = new OllamaToolProperty
+                            ["media_type"] = new OpenAiToolProperty
                             {
                                 Type = "string",
                                 Description = "Restrict to 'movie' or 'series'. Omit for both.",
                                 Enum = new List<string> { "movie", "series" }
                             },
-                            ["limit"] = new OllamaToolProperty
+                            ["limit"] = new OpenAiToolProperty
                             {
                                 Type = "number",
                                 Description = "Number of items to return (1-100, default 30)."
@@ -296,44 +314,44 @@ public class ChatController : ControllerBase
 
         if (config.TmdbEnabled && !string.IsNullOrWhiteSpace(config.TmdbApiKey))
         {
-            tools.Add(new OllamaTool
+            tools.Add(new OpenAiTool
             {
-                Function = new OllamaToolFunction
+                Function = new OpenAiToolFunction
                 {
                     Name = "discover_tmdb",
                     Description = "Discover movies or TV shows on TMDB by genre, year, rating, and other filters. Great for finding content by mood, theme, or era. Use for recommendations and discovery of content that may or may not be in the library.",
-                    Parameters = new OllamaToolParameters
+                    Parameters = new OpenAiToolParameters
                     {
-                        Properties = new Dictionary<string, OllamaToolProperty>
+                        Properties = new Dictionary<string, OpenAiToolProperty>
                         {
-                            ["media_type"] = new OllamaToolProperty
+                            ["media_type"] = new OpenAiToolProperty
                             {
                                 Type = "string",
                                 Description = "Required. 'movie' or 'tv'.",
                                 Enum = new List<string> { "movie", "tv" }
                             },
-                            ["genres"] = new OllamaToolProperty
+                            ["genres"] = new OpenAiToolProperty
                             {
                                 Type = "string",
                                 Description = "Comma-separated genre names (e.g. 'Drama,Thriller'). Uses TMDB genre names: Action, Adventure, Animation, Comedy, Crime, Documentary, Drama, Family, Fantasy, History, Horror, Music, Mystery, Romance, Science Fiction, Thriller, War, Western."
                             },
-                            ["year_min"] = new OllamaToolProperty
+                            ["year_min"] = new OpenAiToolProperty
                             {
                                 Type = "number",
                                 Description = "Minimum release year."
                             },
-                            ["year_max"] = new OllamaToolProperty
+                            ["year_max"] = new OpenAiToolProperty
                             {
                                 Type = "number",
                                 Description = "Maximum release year."
                             },
-                            ["sort_by"] = new OllamaToolProperty
+                            ["sort_by"] = new OpenAiToolProperty
                             {
                                 Type = "string",
                                 Description = "Sort order. Default: 'popularity.desc'.",
                                 Enum = new List<string> { "popularity.desc", "vote_average.desc", "primary_release_date.desc", "revenue.desc" }
                             },
-                            ["min_rating"] = new OllamaToolProperty
+                            ["min_rating"] = new OpenAiToolProperty
                             {
                                 Type = "number",
                                 Description = "Minimum TMDB vote average (0-10, e.g. 7.0). Requires at least 50 votes."
@@ -344,22 +362,22 @@ public class ChatController : ControllerBase
                 }
             });
 
-            tools.Add(new OllamaTool
+            tools.Add(new OpenAiTool
             {
-                Function = new OllamaToolFunction
+                Function = new OpenAiToolFunction
                 {
                     Name = "get_tmdb_recommendations",
                     Description = "Get movie/TV recommendations similar to a specific title from TMDB. Searches for the title first, then returns similar and recommended titles. Use when the user says 'something like X' or 'movies similar to X'.",
-                    Parameters = new OllamaToolParameters
+                    Parameters = new OpenAiToolParameters
                     {
-                        Properties = new Dictionary<string, OllamaToolProperty>
+                        Properties = new Dictionary<string, OpenAiToolProperty>
                         {
-                            ["title"] = new OllamaToolProperty
+                            ["title"] = new OpenAiToolProperty
                             {
                                 Type = "string",
                                 Description = "The title to find recommendations for."
                             },
-                            ["media_type"] = new OllamaToolProperty
+                            ["media_type"] = new OpenAiToolProperty
                             {
                                 Type = "string",
                                 Description = "Restrict to 'movie' or 'tv'. Omit to search both.",
@@ -374,17 +392,17 @@ public class ChatController : ControllerBase
 
         if (config.SeerrEnabled)
         {
-            tools.Add(new OllamaTool
+            tools.Add(new OpenAiTool
             {
-                Function = new OllamaToolFunction
+                Function = new OpenAiToolFunction
                 {
                     Name = "search_seerr",
                     Description = "Search for movies and TV shows on TMDB via Jellyseerr to find content that can be requested. Use this when content is NOT in the library and the user wants to request it.",
-                    Parameters = new OllamaToolParameters
+                    Parameters = new OpenAiToolParameters
                     {
-                        Properties = new Dictionary<string, OllamaToolProperty>
+                        Properties = new Dictionary<string, OpenAiToolProperty>
                         {
-                            ["query"] = new OllamaToolProperty
+                            ["query"] = new OpenAiToolProperty
                             {
                                 Type = "string",
                                 Description = "The search term (movie or show title)"
@@ -405,13 +423,13 @@ public class ChatController : ControllerBase
     }
 
     private async Task<string> ExecuteToolAsync(
-        OllamaToolCall toolCall,
+        OpenAiToolCall toolCall,
         ChatResponse chatResponse,
         Guid userId,
         CancellationToken cancellationToken)
     {
         var functionName = toolCall.Function.Name;
-        var args = toolCall.Function.Arguments;
+        var args = ParseArguments(toolCall.Function.Arguments);
 
         _logger.LogDebug("Executing tool: {Tool}", functionName);
 
@@ -578,6 +596,33 @@ public class ChatController : ControllerBase
             ?? User.FindFirstValue("userId");
 
         return Guid.TryParse(raw, out var id) ? id : Guid.Empty;
+    }
+
+    // Tool arguments arrive as a JSON-encoded string per the OpenAI spec. Models
+    // occasionally double-encode it, so unwrap one extra layer of quoting.
+    private static JsonElement ParseArguments(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return default;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            var root = doc.RootElement;
+            if (root.ValueKind == JsonValueKind.String)
+            {
+                using var inner = JsonDocument.Parse(root.GetString() ?? "{}");
+                return inner.RootElement.Clone();
+            }
+
+            return root.Clone();
+        }
+        catch (JsonException)
+        {
+            return default;
+        }
     }
 
     private static string GetArgString(JsonElement args, string key)

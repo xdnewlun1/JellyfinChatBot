@@ -9,7 +9,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
 {
     public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
-        serviceCollection.AddSingleton<OllamaService>();
+        serviceCollection.AddSingleton<ChatCompletionService>();
         serviceCollection.AddSingleton<LibrarySearchService>();
         serviceCollection.AddSingleton<SeerrService>();
         serviceCollection.AddSingleton<TmdbService>();

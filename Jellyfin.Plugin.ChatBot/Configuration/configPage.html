@@ -13,18 +13,42 @@
 
                 <form id="chatbot-config-form">
                     <div class="verticalSection">
-                        <h3 class="sectionTitle">Ollama Configuration</h3>
+                        <h3 class="sectionTitle">AI Endpoint Configuration</h3>
                         <div class="inputContainer">
-                            <label class="inputLabel" for="txtOllamaUrl">Ollama URL</label>
-                            <input id="txtOllamaUrl" type="text" is="emby-input"
-                                   placeholder="http://localhost:11434" />
-                            <div class="fieldDescription">The URL of your Ollama instance.</div>
+                            <label class="inputLabel" for="txtApiBaseUrl">API Base URL</label>
+                            <input id="txtApiBaseUrl" type="text" is="emby-input"
+                                   placeholder="http://localhost:11434/v1" />
+                            <div class="fieldDescription">
+                                Base URL of any OpenAI-compatible endpoint, normally ending in <code>/v1</code>.
+                                Ollama: <code>http://localhost:11434/v1</code>. LM Studio: <code>http://localhost:1234/v1</code>.
+                                OpenAI: <code>https://api.openai.com/v1</code>. A bare host with no path gets <code>/v1</code> appended automatically.
+                            </div>
                         </div>
                         <div class="inputContainer">
-                            <label class="inputLabel" for="txtOllamaModel">Ollama Model</label>
-                            <input id="txtOllamaModel" type="text" is="emby-input"
+                            <label class="inputLabel" for="txtApiKey">API Key</label>
+                            <input id="txtApiKey" type="password" is="emby-input" />
+                            <div class="fieldDescription">Sent as <code>Authorization: Bearer</code>. Leave empty for local backends that don't authenticate.</div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="txtModel">Model</label>
+                            <input id="txtModel" type="text" is="emby-input"
                                    placeholder="llama3.2" />
-                            <div class="fieldDescription">The model to use for chat (e.g. llama3.2, mistral, gemma2).</div>
+                            <div class="fieldDescription">Primary model to use for chat (e.g. llama3.2, mistral, gpt-4o-mini).</div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="txtFallbackModels">Fallback Models</label>
+                            <textarea id="txtFallbackModels" is="emby-textarea" rows="2"
+                                      placeholder="mistral, gemma2"></textarea>
+                            <div class="fieldDescription">
+                                Optional. One per line or comma separated, tried in order when the primary model
+                                is unavailable or errors. A failing model is skipped for 60 seconds.
+                            </div>
+                        </div>
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="txtRequestTimeout">Request Timeout (seconds)</label>
+                            <input id="txtRequestTimeout" type="number" is="emby-input"
+                                   min="10" max="600" step="5" placeholder="120" />
+                            <div class="fieldDescription">How long to wait for one model before falling back to the next.</div>
                         </div>
                         <div class="inputContainer">
                             <label class="inputLabel" for="txtTemperature">Temperature</label>
@@ -37,7 +61,7 @@
                                 <input id="chkEnableThinking" type="checkbox" is="emby-checkbox" />
                                 <span>Enable Thinking / Extended Reasoning</span>
                             </label>
-                            <div class="fieldDescription" style="margin-left:2em;">Let the model reason internally before responding. Improves recommendation quality but increases response time. Requires a model that supports thinking (e.g. Gemma 4, QwQ, DeepSeek-R1).</div>
+                            <div class="fieldDescription" style="margin-left:2em;">Let the model reason internally before responding. Improves recommendation quality but increases response time. Requires a model that supports thinking (e.g. Gemma 4, QwQ, DeepSeek-R1). Sends <code>reasoning_effort</code> where the backend accepts it; reasoning is always kept out of the visible reply either way.</div>
                         </div>
                         <div class="inputContainer">
                             <label class="inputLabel" for="txtSystemPrompt">System Prompt</label>
@@ -106,10 +130,10 @@
                 </form>
 
                 <div style="margin-top:1.5em;">
-                    <button id="btnTestOllama" is="emby-button" type="button" class="raised">
-                        <span>Test Ollama Connection</span>
+                    <button id="btnTestAi" is="emby-button" type="button" class="raised">
+                        <span>Test AI Connection</span>
                     </button>
-                    <span id="ollamaTestResult" style="margin-left:1em;"></span>
+                    <span id="aiTestResult" style="margin-left:1em;"></span>
                 </div>
 
                 <div style="margin-top:0.75em;">
@@ -130,8 +154,11 @@
             function loadConfig() {
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(pluginId).then(function (config) {
-                    $('txtOllamaUrl').value = config.OllamaUrl || '';
-                    $('txtOllamaModel').value = config.OllamaModel || '';
+                    $('txtApiBaseUrl').value = config.ApiBaseUrl || '';
+                    $('txtApiKey').value = config.ApiKey || '';
+                    $('txtModel').value = config.Model || '';
+                    $('txtFallbackModels').value = config.FallbackModels || '';
+                    $('txtRequestTimeout').value = config.RequestTimeoutSeconds || 120;
                     $('txtTemperature').value = config.Temperature != null ? config.Temperature : 0.7;
                     $('txtSystemPrompt').value = config.SystemPrompt || '';
                     $('txtMaxTurns').value = config.MaxConversationTurns || 20;
@@ -150,8 +177,11 @@
                 e.preventDefault();
                 Dashboard.showLoadingMsg();
                 ApiClient.getPluginConfiguration(pluginId).then(function (config) {
-                    config.OllamaUrl = $('txtOllamaUrl').value;
-                    config.OllamaModel = $('txtOllamaModel').value;
+                    config.ApiBaseUrl = $('txtApiBaseUrl').value.trim();
+                    config.ApiKey = $('txtApiKey').value.trim();
+                    config.Model = $('txtModel').value.trim();
+                    config.FallbackModels = $('txtFallbackModels').value.trim();
+                    config.RequestTimeoutSeconds = parseInt($('txtRequestTimeout').value, 10) || 120;
                     config.Temperature = parseFloat($('txtTemperature').value) || 0.7;
                     config.SystemPrompt = $('txtSystemPrompt').value;
                     config.MaxConversationTurns = parseInt($('txtMaxTurns').value, 10) || 20;
@@ -192,11 +222,11 @@
                 });
             }
 
-            function testOllama(e) {
+            function testAi(e) {
                 if (e) { e.preventDefault(); }
-                runTest('ollamaTestResult', 'ChatBot/Chat/TestConnection',
-                    'Connected! Models: ',
-                    'Connection failed. Check the URL and ensure Ollama is running.');
+                runTest('aiTestResult', 'ChatBot/Chat/TestConnection',
+                    '',
+                    'Connection failed. Check the base URL and API key, and save settings first.');
             }
 
             function testSeerr(e) {
@@ -241,8 +271,8 @@
                 var form = $('chatbot-config-form');
                 if (form) form.addEventListener('submit', saveConfig);
 
-                var btn = $('btnTestOllama');
-                if (btn) btn.addEventListener('click', testOllama);
+                var btn = $('btnTestAi');
+                if (btn) btn.addEventListener('click', testAi);
 
                 var resetBtn = $('btnResetPrompt');
                 if (resetBtn) resetBtn.addEventListener('click', resetPrompt);
