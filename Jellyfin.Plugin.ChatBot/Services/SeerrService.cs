@@ -1,4 +1,6 @@
 using System;
+using System.Linq;
+using System.Globalization;
 using System.Collections.Generic;
 using System.Net.Http;
 using System.Net.Http.Json;
@@ -203,6 +205,114 @@ public class SeerrService
         }
 
         return results;
+    }
+
+    // Turns TMDB discoveries into requestable Seerr entries. Seerr is keyed by TMDB id,
+    // so each result can be looked up directly; the point of the lookup is the status,
+    // which is what tells the user (and the model) whether a title is already available,
+    // already requested, or genuinely requestable.
+    public async Task<List<SeerrSearchResult>> ResolveTmdbResultsAsync(
+        IReadOnlyList<TmdbResult> tmdbResults,
+        CancellationToken cancellationToken = default)
+    {
+        var config = Plugin.Instance!.Configuration;
+        if (!config.SeerrEnabled || string.IsNullOrEmpty(config.SeerrUrl) || tmdbResults.Count == 0)
+        {
+            return new List<SeerrSearchResult>();
+        }
+
+        // Cap the fan-out: one HTTP call per title, and the UI only shows a handful.
+        var candidates = tmdbResults.Take(12).ToList();
+        var resolved = new SeerrSearchResult?[candidates.Count];
+
+        using var throttle = new SemaphoreSlim(4);
+        var tasks = candidates.Select(async (item, index) =>
+        {
+            await throttle.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                resolved[index] = await ResolveOneAsync(item, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                throttle.Release();
+            }
+        });
+
+        await Task.WhenAll(tasks).ConfigureAwait(false);
+
+        // Preserve the order TMDB ranked them in.
+        return resolved.Where(r => r != null).Select(r => r!).ToList();
+    }
+
+    private async Task<SeerrSearchResult?> ResolveOneAsync(TmdbResult item, CancellationToken cancellationToken)
+    {
+        var mediaType = string.Equals(item.MediaType, "tv", StringComparison.OrdinalIgnoreCase) ? "tv" : "movie";
+
+        try
+        {
+            var details = await GetMediaDetailsAsync(mediaType, item.Id, cancellationToken).ConfigureAwait(false);
+
+            var title = details.TryGetProperty(mediaType == "tv" ? "name" : "title", out var t)
+                ? t.GetString()
+                : null;
+
+            string? rawDate = null;
+            if (details.TryGetProperty(mediaType == "tv" ? "firstAirDate" : "releaseDate", out var d))
+            {
+                rawDate = d.GetString();
+            }
+
+            var status = 0;
+            if (details.TryGetProperty("mediaInfo", out var mi) && mi.TryGetProperty("status", out var st)
+                && st.ValueKind == JsonValueKind.Number)
+            {
+                status = st.GetInt32();
+            }
+
+            return new SeerrSearchResult
+            {
+                Id = item.Id,
+                MediaType = mediaType,
+                Title = title ?? item.Title,
+                Overview = details.TryGetProperty("overview", out var ov) ? ov.GetString() ?? item.Overview : item.Overview,
+                Year = rawDate is { Length: >= 4 } ? rawDate[..4] : item.Year?.ToString(CultureInfo.InvariantCulture),
+                PosterPath = details.TryGetProperty("posterPath", out var pp) && pp.ValueKind == JsonValueKind.String
+                    ? pp.GetString()
+                    : ToPosterPath(item.PosterUrl),
+                Status = status
+            };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A title Seerr cannot describe is still worth offering — it just has no
+            // status, so it shows as requestable rather than being dropped.
+            _logger.LogDebug(ex, "Seerr lookup failed for {MediaType} {TmdbId}; using TMDB data.", mediaType, item.Id);
+
+            return new SeerrSearchResult
+            {
+                Id = item.Id,
+                MediaType = mediaType,
+                Title = item.Title,
+                Overview = item.Overview,
+                Year = item.Year?.ToString(CultureInfo.InvariantCulture),
+                PosterPath = ToPosterPath(item.PosterUrl),
+                Status = 0
+            };
+        }
+    }
+
+    // The widget prefixes the TMDB image host itself, so strip a full URL back to the
+    // bare "/abc.jpg" path Seerr results carry.
+    private static string? ToPosterPath(string? posterUrl)
+    {
+        if (string.IsNullOrWhiteSpace(posterUrl))
+        {
+            return null;
+        }
+
+        var marker = posterUrl.LastIndexOf('/');
+        return marker >= 0 ? posterUrl[marker..] : posterUrl;
     }
 
     public async Task<JsonElement> RequestMediaAsync(SeerrRequestDto request, int? onBehalfOfSeerrUserId = null, CancellationToken cancellationToken = default)

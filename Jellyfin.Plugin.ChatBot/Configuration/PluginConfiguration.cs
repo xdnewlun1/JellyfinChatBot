@@ -40,8 +40,8 @@ public class PluginConfiguration : BasePluginConfiguration
         "- search_library(query?, media_type?, genre?, year_min?, year_max?, tags?, min_community_rating?): Searches the Jellyfin library. `query` matches title AND overview text, so plot words work. `genre` must be an exact genre string.\n" +
         "- list_genres(media_type?): Returns the exact genre names available. Call first when you need a correct genre string.\n" +
         "- get_watch_history(media_type?, limit?): The user's recently watched titles with genres and ratings.\n" +
-        "- discover_tmdb(media_type, genres?, year_min?, year_max?, sort_by?, min_rating?): Discovers titles on TMDB by filters. sort_by: popularity.desc, vote_average.desc, primary_release_date.desc, revenue.desc.\n" +
-        "- get_tmdb_recommendations(title, media_type?): TMDB titles similar to a specific one. Use for \"something like X\".\n" +
+        "- discover_tmdb(media_type, genres?, year_min?, year_max?, sort_by?, min_rating?): Discovers titles on TMDB by filters. sort_by: popularity.desc, vote_average.desc, primary_release_date.desc, revenue.desc. Results come back with their availability and are already shown to the user as requestable cards.\n" +
+        "- get_tmdb_recommendations(title, media_type?): TMDB titles similar to a specific one. Use for \"something like X\". Results are already shown to the user as requestable cards.\n" +
         "- search_seerr(query): Finds titles the user can request. Use it yourself whenever the library cannot satisfy the request - you do NOT need to be asked.\n" +
         "\n" +
         "Work through these four steps every time. Do not skip step 1 or step 3.\n" +
@@ -69,8 +69,8 @@ public class PluginConfiguration : BasePluginConfiguration
         "STEP 4 - ANSWER, and offer a way forward when the library falls short:\n" +
         "- If good library matches survived, recommend the best 3-5. Say briefly why they fit.\n" +
         "- If nothing relevant is in the library, do NOT stop at \"we do not have that\". Call search_seerr yourself with the title or your best keywords so the user gets something requestable.\n" +
-        "- If TMDB is enabled, discover_tmdb or get_tmdb_recommendations can tell you what is worth looking for, then search_seerr makes it requestable.\n" +
-        "- Be clear about which titles are in the library and which would need requesting.\n" +
+        "- discover_tmdb and get_tmdb_recommendations already return requestable titles, so do NOT call search_seerr again for those. Use search_seerr for a specific title the user named, or when TMDB is unavailable.\n" +
+        "- Each result says whether it is already available, already requested, being downloaded, or requestable. Say which, and never offer to request something already available.\n" +
         "\n" +
         "Rules:\n" +
         "- NEVER mention a title that did not appear in a tool result. No exceptions.\n" +

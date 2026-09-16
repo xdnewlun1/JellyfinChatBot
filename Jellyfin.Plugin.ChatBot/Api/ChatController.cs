@@ -340,7 +340,7 @@ public class ChatController : ControllerBase
                 Function = new OpenAiToolFunction
                 {
                     Name = "discover_tmdb",
-                    Description = "Discover movies or TV shows on TMDB by genre, year, rating, and other filters. Great for finding content by mood, theme, or era. Use for recommendations and discovery of content that may or may not be in the library.",
+                    Description = "Discover movies or TV shows on TMDB by genre, year, rating, and other filters. Great for finding content by mood, theme, or era. Use for recommendations and discovery of content that may or may not be in the library. When Jellyseerr is enabled the results come back with their availability and are shown to the user as cards with a Request button, so do not call search_seerr again for the same titles.",
                     Parameters = new OpenAiToolParameters
                     {
                         Properties = new Dictionary<string, OpenAiToolProperty>
@@ -388,7 +388,7 @@ public class ChatController : ControllerBase
                 Function = new OpenAiToolFunction
                 {
                     Name = "get_tmdb_recommendations",
-                    Description = "Get movie/TV recommendations similar to a specific title from TMDB. Searches for the title first, then returns similar and recommended titles. Use when the user says 'something like X' or 'movies similar to X'.",
+                    Description = "Get movie/TV recommendations similar to a specific title from TMDB. Searches for the title first, then returns similar and recommended titles. Use when the user says 'something like X' or 'movies similar to X'. When Jellyseerr is enabled the results come back with their availability and are shown to the user as cards with a Request button, so do not call search_seerr again for the same titles.",
                     Parameters = new OpenAiToolParameters
                     {
                         Properties = new Dictionary<string, OpenAiToolProperty>
@@ -540,19 +540,12 @@ public class ChatController : ControllerBase
                         string.IsNullOrWhiteSpace(sortBy) ? null : sortBy,
                         minRating > 0 ? minRating : null,
                         cancellationToken).ConfigureAwait(false);
-                    chatResponse.TmdbResults = results;
-
                     if (results.Count == 0)
                     {
                         return JsonSerializer.Serialize(new { found = false, message = "No TMDB results matched the filters." });
                     }
 
-                    return JsonSerializer.Serialize(new
-                    {
-                        found = true,
-                        count = results.Count,
-                        results = results.Select(r => new { r.Title, r.Year, r.MediaType, r.Overview, r.Rating, r.Genres })
-                    });
+                    return await PresentTmdbResultsAsync(results, chatResponse, cancellationToken).ConfigureAwait(false);
                 }
 
                 case "get_tmdb_recommendations":
@@ -564,26 +557,19 @@ public class ChatController : ControllerBase
                         title,
                         string.IsNullOrWhiteSpace(mediaType) ? null : mediaType,
                         cancellationToken).ConfigureAwait(false);
-                    chatResponse.TmdbResults = results;
-
                     if (results.Count == 0)
                     {
                         return JsonSerializer.Serialize(new { found = false, message = $"No recommendations found for '{title}'." });
                     }
 
-                    return JsonSerializer.Serialize(new
-                    {
-                        found = true,
-                        count = results.Count,
-                        results = results.Select(r => new { r.Title, r.Year, r.MediaType, r.Overview, r.Rating, r.Genres })
-                    });
+                    return await PresentTmdbResultsAsync(results, chatResponse, cancellationToken).ConfigureAwait(false);
                 }
 
                 case "search_seerr":
                 {
                     var query = GetArgString(args, "query");
                     var results = await _seerrService.SearchAsync(query, cancellationToken).ConfigureAwait(false);
-                    chatResponse.SeerrResults = results;
+                    AddSeerrResults(chatResponse, results);
 
                     if (results.Count == 0)
                     {
@@ -607,6 +593,88 @@ public class ChatController : ControllerBase
             // Do not leak exception details back to the LLM (which echoes to the user).
             _logger.LogError(ex, "Tool execution failed: {Tool}", functionName);
             return JsonSerializer.Serialize(new { error = $"Tool '{functionName}' failed." });
+        }
+    }
+
+    // TMDB discoveries are only useful if the user can act on them, so they are shown as
+    // Seerr cards — the ones with a Request button — rather than as inert TMDB cards the
+    // widget has no renderer for. Falls back to raw TMDB results when Seerr is off.
+    private async Task<string> PresentTmdbResultsAsync(
+        List<TmdbResult> results,
+        ChatResponse chatResponse,
+        CancellationToken cancellationToken)
+    {
+        List<SeerrSearchResult> requestable;
+        try
+        {
+            requestable = await _seerrService.ResolveTmdbResultsAsync(results, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Could not forward TMDB results to Jellyseerr.");
+            requestable = new List<SeerrSearchResult>();
+        }
+
+        if (requestable.Count == 0)
+        {
+            chatResponse.TmdbResults = results;
+            return JsonSerializer.Serialize(new
+            {
+                found = true,
+                count = results.Count,
+                results = results.Select(r => new { r.Title, r.Year, r.MediaType, r.Overview, r.Rating, r.Genres })
+            });
+        }
+
+        AddSeerrResults(chatResponse, requestable);
+
+        // Telling the model what is already available stops it offering to request
+        // something the server already has.
+        var ratings = results.ToDictionary(r => (r.MediaType ?? string.Empty) + ":" + r.Id, r => r.Rating);
+        return JsonSerializer.Serialize(new
+        {
+            found = true,
+            count = requestable.Count,
+            note = "These are shown to the user as requestable cards with a Request button.",
+            results = requestable.Select(r => new
+            {
+                r.Title,
+                r.Year,
+                r.MediaType,
+                r.Overview,
+                Rating = ratings.TryGetValue((r.MediaType ?? string.Empty) + ":" + r.Id, out var rating) ? rating : null,
+                Availability = DescribeSeerrStatus(r.Status)
+            })
+        });
+    }
+
+    private static string DescribeSeerrStatus(int status) => status switch
+    {
+        5 => "already available in the library",
+        4 => "being downloaded now",
+        3 => "already requested",
+        _ => "requestable"
+    };
+
+    // A single turn can hit several tools that produce cards, so results accumulate
+    // instead of the last call erasing the earlier ones.
+    private static void AddSeerrResults(ChatResponse chatResponse, List<SeerrSearchResult> results)
+    {
+        if (results.Count == 0)
+        {
+            return;
+        }
+
+        chatResponse.SeerrResults ??= new List<SeerrSearchResult>();
+
+        foreach (var result in results)
+        {
+            if (!chatResponse.SeerrResults.Any(existing =>
+                    existing.Id == result.Id &&
+                    string.Equals(existing.MediaType, result.MediaType, StringComparison.OrdinalIgnoreCase)))
+            {
+                chatResponse.SeerrResults.Add(result);
+            }
         }
     }
 
