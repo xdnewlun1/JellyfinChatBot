@@ -171,10 +171,30 @@ public class ChatController : ControllerBase
             }
         }
 
-        // If we hit the loop limit, return whatever we have
+        // Round budget exhausted: the model kept calling tools without ever composing an
+        // answer, which is the normal shape of a fruitless search. Ask once more with no
+        // tools so it has to reply in prose, rather than showing the user a bare error.
         if (string.IsNullOrEmpty(chatResponse.Reply))
         {
-            chatResponse.Reply = "I encountered an issue processing your request. Please try again.";
+            try
+            {
+                var final = await _chatService.ChatAsync(messages, null, pinnedModel, cancellationToken)
+                    .ConfigureAwait(false);
+                chatResponse.Reply = final.Message.Content ?? string.Empty;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Final tool-free completion failed after the tool round limit.");
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(chatResponse.Reply))
+        {
+            chatResponse.Reply = "I searched but didn't turn up anything matching that. Try rephrasing, or ask me to look for something to request.";
         }
 
         return Ok(chatResponse);

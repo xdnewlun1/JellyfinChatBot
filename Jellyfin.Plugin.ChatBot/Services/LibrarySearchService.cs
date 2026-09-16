@@ -54,6 +54,84 @@ public class LibrarySearchService
         _queryUserProp?.SetValue(query, user);
     }
 
+    // Words that carry no signal in a media query — dropping them keeps "sad movie"
+    // from matching every item whose overview contains the word "movie".
+    private static readonly HashSet<string> StopWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "the", "and", "for", "with", "about", "that", "this", "from", "some", "something",
+        "anything", "any", "like", "similar", "movie", "movies", "film", "films", "show",
+        "shows", "series", "episode", "episodes", "watch", "watching", "please", "give",
+        "find", "looking", "want", "have", "has", "are", "was", "were", "you", "got"
+    };
+
+    internal static List<string> Tokenize(string query)
+    {
+        var tokens = new List<string>();
+        foreach (var raw in query.Split(
+                     new[] { ' ', '\t', '\n', '\r', ',', '.', ';', ':', '!', '?', '"', '\'', '(', ')', '[', ']', '/', '\\', '-', '_' },
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            var token = raw.Trim();
+            if (token.Length < 3 || StopWords.Contains(token))
+            {
+                continue;
+            }
+
+            if (!tokens.Contains(token, StringComparer.OrdinalIgnoreCase))
+            {
+                tokens.Add(token);
+            }
+        }
+
+        return tokens;
+    }
+
+    // Weighted so a title hit outranks an overview hit, and an exact phrase outranks
+    // any number of scattered token hits.
+    internal static int ScoreText(string? name, string? overview, IEnumerable<string>? facets, IReadOnlyList<string> tokens, string? phrase)
+    {
+        var score = 0;
+
+        if (!string.IsNullOrWhiteSpace(phrase))
+        {
+            if (name != null && name.Contains(phrase, StringComparison.OrdinalIgnoreCase)) score += 40;
+            else if (overview != null && overview.Contains(phrase, StringComparison.OrdinalIgnoreCase)) score += 20;
+        }
+
+        foreach (var token in tokens)
+        {
+            if (name != null && name.Contains(token, StringComparison.OrdinalIgnoreCase)) score += 4;
+            else if (overview != null && overview.Contains(token, StringComparison.OrdinalIgnoreCase)) score += 2;
+            else if (facets != null && facets.Any(f => f != null && f.Contains(token, StringComparison.OrdinalIgnoreCase))) score += 1;
+        }
+
+        return score;
+    }
+
+    private InternalItemsQuery BuildQuery(BaseItemKind[] itemTypes, object user, string? genre, string? tags, int limit)
+    {
+        var query = new InternalItemsQuery
+        {
+            IncludeItemTypes = itemTypes,
+            Limit = limit,
+            IsVirtualItem = false,
+            Recursive = true
+        };
+        ApplyUser(query, user);
+
+        if (!string.IsNullOrWhiteSpace(genre))
+        {
+            query.Genres = new[] { genre };
+        }
+
+        if (!string.IsNullOrWhiteSpace(tags))
+        {
+            query.Tags = new[] { tags };
+        }
+
+        return query;
+    }
+
     public List<LibrarySearchResult> Search(
         Guid userId,
         string? query,
@@ -85,89 +163,93 @@ public class LibrarySearchService
             return new List<LibrarySearchResult>();
         }
 
-        // When post-filters are active, fetch more items so we have enough after filtering
-        bool hasPostFilters = yearMin.HasValue || yearMax.HasValue || minCommunityRating.HasValue;
-        var queryLimit = hasPostFilters ? Math.Min(searchLimit * 10, 500) : searchLimit;
+        var types = itemTypes.ToArray();
+        var hasQuery = !string.IsNullOrWhiteSpace(query);
+        var phrase = hasQuery ? query!.Trim() : null;
+        var tokens = hasQuery ? Tokenize(phrase!) : new List<string>();
 
-        var internalQuery = new InternalItemsQuery
-        {
-            IncludeItemTypes = itemTypes.ToArray(),
-            Limit = queryLimit,
-            IsVirtualItem = false,
-            Recursive = true
-        };
-        ApplyUser(internalQuery, user);
-
-        if (!string.IsNullOrWhiteSpace(query))
-        {
-            internalQuery.SearchTerm = query;
-        }
-
-        if (!string.IsNullOrWhiteSpace(genre))
-        {
-            internalQuery.Genres = new[] { genre };
-        }
-
-        if (!string.IsNullOrWhiteSpace(tags))
-        {
-            internalQuery.Tags = new[] { tags };
-        }
-
-        _logger.LogDebug("Library search: qLen={QLen} type={Type} genre={GenrePresent} yearRange={YearMin}-{YearMax} rating>={Rating}",
-            (query ?? string.Empty).Length, mediaType ?? "all", !string.IsNullOrEmpty(genre),
+        _logger.LogDebug("Library search: qLen={QLen} tokens={Tokens} type={Type} genre={GenrePresent} yearRange={YearMin}-{YearMax} rating>={Rating}",
+            (query ?? string.Empty).Length, tokens.Count, mediaType ?? "all", !string.IsNullOrEmpty(genre),
             yearMin, yearMax, minCommunityRating);
 
-        var items = _libraryManager.GetItemsResult(internalQuery).Items;
+        // Two passes, merged by id. Jellyfin's own SearchTerm is authoritative for
+        // titles; the wider scan is what makes thematic queries work, because
+        // SearchTerm does not look at overview text.
+        var candidates = new Dictionary<Guid, (BaseItem Item, int Score)>();
 
-        // If a query was supplied alongside a genre, SearchTerm may be ignored when genres are set.
-        // Fall back to a manual overview/title filter so "space" can match overview text.
-        if (!string.IsNullOrWhiteSpace(query))
+        void Offer(BaseItem item, int score)
         {
-            var q = query.Trim();
-            items = items.Where(i =>
-                (i.Name != null && i.Name.Contains(q, StringComparison.OrdinalIgnoreCase)) ||
-                (i.Overview != null && i.Overview.Contains(q, StringComparison.OrdinalIgnoreCase))
-            ).ToArray();
+            if (score <= 0)
+            {
+                return;
+            }
+
+            if (!candidates.TryGetValue(item.Id, out var existing) || score > existing.Score)
+            {
+                candidates[item.Id] = (item, score);
+            }
         }
 
-        IEnumerable<BaseItem> filtered = items;
+        if (hasQuery)
+        {
+            var titleQuery = BuildQuery(types, user, genre, tags, Math.Min(searchLimit * 5, 100));
+            titleQuery.SearchTerm = phrase;
+            foreach (var item in _libraryManager.GetItemsResult(titleQuery).Items)
+            {
+                // Server-vetted match: score it on content, but never below a floor, so a
+                // title Jellyfin matched cannot be filtered out by our own heuristics.
+                Offer(item, Math.Max(ScoreText(item.Name, item.Overview, item.Genres?.Concat(item.Tags ?? Array.Empty<string>()), tokens, phrase), 8));
+            }
+        }
 
-        // Post-filter by year range
+        // Wide scan for thematic matching, and for genre/tag-only browsing.
+        var scanLimit = hasQuery || yearMin.HasValue || yearMax.HasValue || minCommunityRating.HasValue
+            ? Math.Min(Math.Max(searchLimit * 20, 200), 500)
+            : searchLimit;
+        var scanQuery = BuildQuery(types, user, genre, tags, scanLimit);
+        foreach (var item in _libraryManager.GetItemsResult(scanQuery).Items)
+        {
+            // With no usable query this is a plain browse, so everything qualifies.
+            Offer(item, tokens.Count == 0 && string.IsNullOrWhiteSpace(phrase)
+                ? 1
+                : ScoreText(item.Name, item.Overview, item.Genres?.Concat(item.Tags ?? Array.Empty<string>()), tokens, phrase));
+        }
+
+        IEnumerable<(BaseItem Item, int Score)> filtered = candidates.Values;
+
         if (yearMin.HasValue)
         {
-            filtered = filtered.Where(i => i.ProductionYear.HasValue && i.ProductionYear.Value >= yearMin.Value);
+            filtered = filtered.Where(c => c.Item.ProductionYear.HasValue && c.Item.ProductionYear.Value >= yearMin.Value);
         }
 
         if (yearMax.HasValue)
         {
-            filtered = filtered.Where(i => i.ProductionYear.HasValue && i.ProductionYear.Value <= yearMax.Value);
+            filtered = filtered.Where(c => c.Item.ProductionYear.HasValue && c.Item.ProductionYear.Value <= yearMax.Value);
         }
 
-        // Post-filter by community rating
         if (minCommunityRating.HasValue)
         {
-            filtered = filtered.Where(i => i.CommunityRating.HasValue && i.CommunityRating.Value >= minCommunityRating.Value);
+            filtered = filtered.Where(c => c.Item.CommunityRating.HasValue && c.Item.CommunityRating.Value >= minCommunityRating.Value);
         }
 
-        // When filters are active, sort by community rating so the best content surfaces first
-        if (hasPostFilters || !string.IsNullOrWhiteSpace(genre))
-        {
-            filtered = filtered.OrderByDescending(i => i.CommunityRating ?? 0f);
-        }
-
-        return filtered.Take(searchLimit).Select(item => new LibrarySearchResult
-        {
-            Id = item.Id.ToString("N"),
-            Name = item.Name,
-            Overview = item.Overview,
-            Year = item.ProductionYear,
-            Type = item.GetBaseItemKind().ToString(),
-            ImageUrl = item.PrimaryImagePath != null
-                ? $"/Items/{item.Id}/Images/Primary"
-                : null,
-            Genres = item.Genres?.Length > 0 ? item.Genres.ToList() : null,
-            CommunityRating = item.CommunityRating
-        }).ToList();
+        return filtered
+            .OrderByDescending(c => c.Score)
+            .ThenByDescending(c => c.Item.CommunityRating ?? 0f)
+            .Take(searchLimit)
+            .Select(c => new LibrarySearchResult
+            {
+                Id = c.Item.Id.ToString("N"),
+                Name = c.Item.Name,
+                Overview = c.Item.Overview,
+                Year = c.Item.ProductionYear,
+                Type = c.Item.GetBaseItemKind().ToString(),
+                ImageUrl = c.Item.PrimaryImagePath != null
+                    ? $"/Items/{c.Item.Id}/Images/Primary"
+                    : null,
+                Genres = c.Item.Genres?.Length > 0 ? c.Item.Genres.ToList() : null,
+                CommunityRating = c.Item.CommunityRating
+            })
+            .ToList();
     }
 
     public List<string> GetGenres(Guid userId, string? mediaType = null)
