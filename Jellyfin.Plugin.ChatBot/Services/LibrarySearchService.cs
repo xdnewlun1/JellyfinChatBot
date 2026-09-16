@@ -64,12 +64,16 @@ public class LibrarySearchService
         "find", "looking", "want", "have", "has", "are", "was", "were", "you", "got"
     };
 
+    private static readonly char[] WordSeparators =
+    {
+        ' ', '\t', '\n', '\r', ',', '.', ';', ':', '!', '?', '"', '\'', '\u2019',
+        '(', ')', '[', ']', '{', '}', '/', '\\', '-', '_', '&', '+', '*', '#', '@', '|'
+    };
+
     internal static List<string> Tokenize(string query)
     {
         var tokens = new List<string>();
-        foreach (var raw in query.Split(
-                     new[] { ' ', '\t', '\n', '\r', ',', '.', ';', ':', '!', '?', '"', '\'', '(', ')', '[', ']', '/', '\\', '-', '_' },
-                     StringSplitOptions.RemoveEmptyEntries))
+        foreach (var raw in query.Split(WordSeparators, StringSplitOptions.RemoveEmptyEntries))
         {
             var token = raw.Trim();
             if (token.Length < 3 || StopWords.Contains(token))
@@ -77,32 +81,123 @@ public class LibrarySearchService
                 continue;
             }
 
-            if (!tokens.Contains(token, StringComparer.OrdinalIgnoreCase))
+            var stem = Stem(token);
+            if (stem.Length > 0 && !tokens.Contains(stem, StringComparer.OrdinalIgnoreCase))
             {
-                tokens.Add(token);
+                tokens.Add(stem);
             }
         }
 
         return tokens;
     }
 
-    // Weighted so a title hit outranks an overview hit, and an exact phrase outranks
-    // any number of scattered token hits.
+    // Crude suffix stripping, enough to collapse race/races/racing/racer to one stem so
+    // a query word matches the forms that actually appear in overview text.
+    internal static string Stem(string word)
+    {
+        var w = word.ToLowerInvariant();
+
+        if (w.Length > 5 && w.EndsWith("ing", StringComparison.Ordinal)) w = w[..^3];
+        else if (w.Length > 4 && w.EndsWith("ers", StringComparison.Ordinal)) w = w[..^3];
+        else if (w.Length > 4 && w.EndsWith("ed", StringComparison.Ordinal)) w = w[..^2];
+        else if (w.Length > 4 && w.EndsWith("er", StringComparison.Ordinal)) w = w[..^2];
+        else if (w.Length > 3 && w.EndsWith("es", StringComparison.Ordinal)) w = w[..^2];
+        else if (w.Length > 3 && w.EndsWith("s", StringComparison.Ordinal)) w = w[..^1];
+
+        if (w.Length > 3 && w.EndsWith("e", StringComparison.Ordinal)) w = w[..^1];
+
+        return w;
+    }
+
+    private static HashSet<string> StemWords(string? text)
+    {
+        var stems = new HashSet<string>(StringComparer.Ordinal);
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return stems;
+        }
+
+        foreach (var word in text.Split(WordSeparators, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (word.Length >= 2)
+            {
+                stems.Add(Stem(word));
+            }
+        }
+
+        return stems;
+    }
+
+    // Whole-word (stemmed) matching, so "car" no longer matches "Oscar" or "Carol".
+    // A prefix is allowed only for longer stems, where it is discriminating enough to
+    // be worth the recall ("spac" -> "spaceship") rather than noise ("car" -> "carol").
+    private static bool Matches(HashSet<string> stems, string token)
+    {
+        if (stems.Contains(token))
+        {
+            return true;
+        }
+
+        return token.Length >= 4 && stems.Any(s => s.StartsWith(token, StringComparison.Ordinal));
+    }
+
+    // Weighted so a title hit outranks an overview hit, an exact phrase outranks any
+    // number of scattered hits, and — most importantly for relevance — an item matching
+    // every word of the request outranks one matching a single word by coincidence.
+    // "race car" should surface Ford v Ferrari, not RuPaul's Drag Race.
     internal static int ScoreText(string? name, string? overview, IEnumerable<string>? facets, IReadOnlyList<string> tokens, string? phrase)
     {
         var score = 0;
 
-        if (!string.IsNullOrWhiteSpace(phrase))
+        // Only a multi-word phrase earns the bonus. For a single word the substring test
+        // is the very false positive the stemmed word matching below exists to avoid —
+        // "car" would otherwise score a direct hit on "Oscar".
+        if (!string.IsNullOrWhiteSpace(phrase) && phrase.Trim().Contains(' '))
         {
-            if (name != null && name.Contains(phrase, StringComparison.OrdinalIgnoreCase)) score += 40;
-            else if (overview != null && overview.Contains(phrase, StringComparison.OrdinalIgnoreCase)) score += 20;
+            var trimmed = phrase.Trim();
+            if (name != null && name.Contains(trimmed, StringComparison.OrdinalIgnoreCase)) score += 40;
+            else if (overview != null && overview.Contains(trimmed, StringComparison.OrdinalIgnoreCase)) score += 20;
         }
 
+        if (tokens.Count == 0)
+        {
+            return score;
+        }
+
+        var nameStems = StemWords(name);
+        var overviewStems = StemWords(overview);
+        var facetStems = new HashSet<string>(StringComparer.Ordinal);
+        if (facets != null)
+        {
+            foreach (var facet in facets)
+            {
+                foreach (var stem in StemWords(facet))
+                {
+                    facetStems.Add(stem);
+                }
+            }
+        }
+
+        var matched = 0;
         foreach (var token in tokens)
         {
-            if (name != null && name.Contains(token, StringComparison.OrdinalIgnoreCase)) score += 4;
-            else if (overview != null && overview.Contains(token, StringComparison.OrdinalIgnoreCase)) score += 2;
-            else if (facets != null && facets.Any(f => f != null && f.Contains(token, StringComparison.OrdinalIgnoreCase))) score += 1;
+            if (Matches(nameStems, token)) { score += 4; matched++; }
+            else if (Matches(overviewStems, token)) { score += 2; matched++; }
+            else if (Matches(facetStems, token)) { score += 1; matched++; }
+        }
+
+        if (matched == 0)
+        {
+            return score;
+        }
+
+        // Coverage dominates the per-hit weights: matching two requested words beats
+        // matching one, however prominently that one appears.
+        score += matched * 10;
+
+        if (matched == tokens.Count && tokens.Count > 1)
+        {
+            score += 15;
         }
 
         return score;

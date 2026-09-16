@@ -238,7 +238,7 @@ public class ChatController : ControllerBase
                 Function = new OpenAiToolFunction
                 {
                     Name = "search_library",
-                    Description = "Search the Jellyfin media library for movies and TV shows. Matches against title and overview/description text. Supports filtering by genre, year range, tags, and minimum community rating. Use this when the user asks about available content.",
+                    Description = "Search the Jellyfin media library for movies and TV shows. Matches title and overview/description text, so plot words work: search the subject matter rather than the user's phrasing (for a race car film, query 'racing motorsport driver', not 'race car movie'). Supports filtering by genre, year range, tags, and minimum community rating. Always read each result's overview and ignore ones that only match by coincidence of wording.",
                     Parameters = new OpenAiToolParameters
                     {
                         Properties = new Dictionary<string, OpenAiToolProperty>
@@ -418,7 +418,7 @@ public class ChatController : ControllerBase
                 Function = new OpenAiToolFunction
                 {
                     Name = "search_seerr",
-                    Description = "Search for movies and TV shows on TMDB via Jellyseerr to find content that can be requested. Use this when content is NOT in the library and the user wants to request it.",
+                    Description = "Search for movies and TV shows that the user can request, for anything the library does not already have. Call this yourself whenever a library search comes back empty or turns up nothing that genuinely matches - the user does not have to ask for it. Returns requestable titles which the UI shows with a Request button.",
                     Parameters = new OpenAiToolParameters
                     {
                         Properties = new Dictionary<string, OpenAiToolProperty>
